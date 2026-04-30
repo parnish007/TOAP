@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Status](https://img.shields.io/badge/status-phase_1_foundation-2F855A?style=for-the-badge)
+![Status](https://img.shields.io/badge/status-phase_2_protocol_core-2F855A?style=for-the-badge)
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-SDK_planned-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Claims](https://img.shields.io/badge/claims-measured_only-4A5568?style=for-the-badge)
@@ -17,15 +17,15 @@ Compact agent-to-agent messages, shared context references, and broker-enforced 
 
 ## Status
 
-TOAP is currently in **phase 1: repository foundation and specification cleanup**.
+TOAP is currently in **phase 2: protocol core**.
 
-There is no production parser, broker, context store, SDK, or benchmark runner yet. The current repository defines the corrected protocol direction, security model, claims policy, test plan, and build skeleton that later implementation phases will use.
+The repository now includes the V1 C++ message model, payload parser, frame parser, encoder, and protocol unit tests. There is no broker, context store, SDK, or benchmark runner yet.
 
 ```bash
 cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
-
-The configure step is expected to succeed. Implementation targets will be added in later phases.
 
 ## Scope
 
@@ -76,7 +76,7 @@ Core components planned across the build phases:
 
 | Component | Role | Status |
 | --- | --- | --- |
-| Protocol core | Parse and encode V1 text messages, later V2 binary frames. | Planned |
+| Protocol core | Parse and encode V1 text messages, later V2 binary frames. | V1 implemented |
 | Broker | Own sessions, route messages, enforce identity. | Planned |
 | Context store | Persist shared data, metadata, TTL, ACL, and deltas. | Planned |
 | Security layer | Validate frames, enforce ACL and taint policy. | Planned |
@@ -109,7 +109,7 @@ See [docs/protocol_v1.md](docs/protocol_v1.md) for the current protocol contract
 
 TOAP treats all peer-agent messages as untrusted. The broker is responsible for identity, routing, ACL checks, taint rules, and rate limits.
 
-Important phase 1 decisions:
+Important protocol decisions:
 
 - Agents cannot claim a trusted `SRC` field in V1.
 - Trust is broker-policy-derived, not self-declared by agents.
@@ -139,6 +139,11 @@ The target release candidate contains:
 +-- README.md
 +-- TEST_PLAN.md
 +-- requirements-dev.txt
++-- protocol/
+    +-- encoder.cpp
+    +-- parser.cpp
+    +-- include/toap/
+    +-- tests/
 +-- docs/
     +-- claims.md
     +-- decisions.md
@@ -155,7 +160,7 @@ The target release candidate contains:
 | [docs/protocol_v1.md](docs/protocol_v1.md) | Exact V1 frame, payload syntax, examples, and validation rules. |
 | [docs/security_model.md](docs/security_model.md) | Identity, sessions, trust, ACL, taint, injection handling, logging. |
 | [docs/claims.md](docs/claims.md) | Measured claims, targets, non-claims, and publication rules. |
-| [docs/decisions.md](docs/decisions.md) | Phase 1 engineering decisions and rationale. |
+| [docs/decisions.md](docs/decisions.md) | Engineering decisions and rationale. |
 | [TEST_PLAN.md](TEST_PLAN.md) | Verification plan for protocol, broker, store, SDK, security, and benchmarks. |
 
 ## Development Setup
@@ -164,6 +169,8 @@ Configure the C++ project:
 
 ```bash
 cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 Install future Python development dependencies:
@@ -172,7 +179,7 @@ Install future Python development dependencies:
 python -m pip install -r requirements-dev.txt
 ```
 
-No runtime command exists yet because phase 1 does not include implementation targets.
+No broker runtime command exists yet. Phase 2 only builds and tests the protocol library.
 
 ## Roadmap
 

@@ -1,0 +1,76 @@
+# Build outputs
+build/
+cmake-build-*/
+out/
+dist/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.pdb
+*.ilk
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Logs and runtime state
+*.log
+logs/
+security.log
+access.log
+*.pid
+*.sock
+
+# Benchmark artifacts
+benchmark/results/
+benchmark/output/
+*.bench.json
+*.bench.csv
+
+# Local configuration and secrets
+.env
+.env.*
+*.local.yaml
+*.local.yml
+config/local/
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Project planning/source-context files not intended for version control
+blueprint.md
+phases.md
+
+# Local agent/tool traces
+.codex/
+.agents/
+codex-*.log
+agent-*.log
