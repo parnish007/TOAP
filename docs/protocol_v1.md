@@ -122,6 +122,38 @@ The parser must reject:
 
 The parser must not reject ordinary content solely because it contains SQL, markdown, HTML, code, or prompt-like text. Content trust is handled through taint metadata and broker policy.
 
+## Implemented Operations (v1.0)
+
+Broker-handled operations (`TARGET = broker`):
+
+| Op | Frame example | Effect |
+| --- | --- | --- |
+| `SET` | `REQ|n|broker|SET()?data=...&acl=*:r&ttl=3600&taint=true` | Store content; returns `OK(CTX:id)`. Owner = broker-derived session. |
+| `GET` | `REQ|n|broker|GET(CTX:42)` | ACL-checked read; returns `OK(CTX:42)?data=...` or `ERR NOCTX/NOPERM`. |
+| `DEL` | `REQ|n|broker|DEL(CTX:42)` | ACL-checked delete (restricted op; blocked on tainted context). |
+| `SUB` | `REQ|n|broker|SUB(CTX:42)` | Subscribe to change events for a context. |
+| `PATCH` | `DLT|n|broker|PATCH(CTX:42)?field=status&value=approved` | Field-level delta; bumps version; fans out `EVT` to subscribers. |
+
+Events to subscribers:
+
+```text
+EVT|0|<subscriber>|CHANGED(CTX:42)?field=status&value=approved&version=3
+```
+
+Agent-to-agent operations are routed by `TARGET = <agent_id>` (e.g. `SUM`, `CLS`, `ANS`). The broker
+correlates the returning `RES`/`ERR` to the requester by `MSG_ID`, so a responder never learns (or
+can spoof) the requester's identity.
+
+### Security enforcement (broker-side)
+
+- **ACL** per context: `agentA:rwd,agentB:r,*:r`. The owner always has full access. Default `*:r`.
+- **Taint**: external/user content is tainted by default (`taint=true`). Restricted ops
+  (`EXEC,EMAIL,SHELL,PAY,DEL`) are refused against tainted context (`ERR NOPERM reason=tainted_context`).
+- **Rate limiting**: per-agent token bucket (`ERR RATE`).
+- **Replay**: duplicate request `MSG_ID` within a session is rejected (`ERR REPLAY`). Full
+  cross-reconnect replay protection (signed nonces) is future work.
+- **TTL**: contexts may expire; expired reads return `NOCTX`; `gc()` evicts them.
+
 ## Parser Contract
 
 The implementation exposes:

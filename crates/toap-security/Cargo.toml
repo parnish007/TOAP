@@ -1,0 +1,8 @@
+[package]
+name = "toap-security"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP security: rate limiting, replay guard, and taint policy (broker-enforced)."
+
+[dependencies]

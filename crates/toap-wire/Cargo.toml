@@ -1,0 +1,9 @@
+[package]
+name = "toap-wire"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP transport framing: 4-byte big-endian length prefix over tokio streams."
+
+[dependencies]
+tokio = { workspace = true }

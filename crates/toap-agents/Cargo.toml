@@ -1,0 +1,11 @@
+[package]
+name = "toap-agents"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP reference demo agents (agent_a driver, agent_b rule-based summarizer)."
+
+[dependencies]
+tokio = { workspace = true }
+toap-core = { workspace = true }
+toap-client = { workspace = true }

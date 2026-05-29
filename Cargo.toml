@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/toap-core",
+    "crates/toap-context",
+    "crates/toap-security",
+    "crates/toap-wire",
+    "crates/toap-client",
+    "crates/toap-broker",
+    "crates/toap-agents",
+    "crates/toap-mcp",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+serde_json = "1"
+toap-core = { path = "crates/toap-core" }
+toap-context = { path = "crates/toap-context" }
+toap-security = { path = "crates/toap-security" }
+toap-wire = { path = "crates/toap-wire" }
+toap-client = { path = "crates/toap-client" }
+toap-broker = { path = "crates/toap-broker" }

@@ -1,0 +1,11 @@
+[package]
+name = "toap-client"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP Rust client SDK: connect, SYN/ACK, request/response correlation, inbound dispatch."
+
+[dependencies]
+tokio = { workspace = true }
+toap-core = { workspace = true }
+toap-wire = { workspace = true }

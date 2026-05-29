@@ -1,0 +1,8 @@
+[package]
+name = "toap-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP V1 protocol core: message model, parser, encoder (no I/O, std only)."
+
+[dependencies]

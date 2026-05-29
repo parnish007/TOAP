@@ -1,0 +1,14 @@
+[package]
+name = "toap-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "MCP frontend: exposes the TOAP context store as MCP tools over JSON-RPC/stdio."
+
+[[bin]]
+name = "toap-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+toap-context = { workspace = true }

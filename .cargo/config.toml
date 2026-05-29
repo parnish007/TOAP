@@ -1,0 +1,9 @@
+# This host has no MSVC and its external MinGW GCC (UCRT, GCC 15) merged libgcc_eh into libgcc,
+# which breaks Rust's windows-gnu `-lgcc_eh` link step. Force Rust to use its own bundled
+# self-contained MinGW libs (which include libgcc_eh.a) for linking.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]
+
+# The C: drive is full; build artifacts go to D: which has free space.
+[build]
+target-dir = "D:/toap-target"

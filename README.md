@@ -2,9 +2,9 @@
 
 <div align="center">
 
-![Status](https://img.shields.io/badge/status-phase_2_protocol_core-2F855A?style=for-the-badge)
-![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
-![Python](https://img.shields.io/badge/Python-SDK_planned-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Status](https://img.shields.io/badge/status-v1.0_working-2F855A?style=for-the-badge)
+![Rust](https://img.shields.io/badge/Rust-stable_(windows--gnu)-DEA584?style=for-the-badge&logo=rust&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-19_passing-4A5568?style=for-the-badge)
 ![Claims](https://img.shields.io/badge/claims-measured_only-4A5568?style=for-the-badge)
 
 **Token-Optimized Agent Protocol**
@@ -17,15 +17,44 @@ Compact agent-to-agent messages, shared context references, and broker-enforced 
 
 ## Status
 
-TOAP is currently in **phase 2: protocol core**.
+TOAP is at **v1.0 (Rust)**. The stack was rewritten from the original C++ prototype following the
+research pass — see the corrected design and evidence in [research.md](research.md).
 
-The repository now includes the V1 C++ message model, payload parser, frame parser, encoder, and protocol unit tests. There is no broker, context store, SDK, or benchmark runner yet.
+What works today (**19 tests passing**, plus live multi-process demos and a token benchmark):
 
-```bash
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+- `toap-core` — V1 message model, parser, encoder, round-trip + validation tests.
+- `toap-context` — context store + the N3 `Reference` materialization chooser, **ACL, TTL+GC, field deltas**.
+- `toap-security` — **token-bucket rate limiter, replay guard, taint policy**.
+- `toap-wire` — length-prefixed tokio framing.
+- `toap-broker` — tokio TCP server, SYN/ACK sessions, **broker-derived identity**, store ops with ACL,
+  taint enforcement, rate-limit, replay rejection, **deltas (`DLT`) + subscriptions (`SUB`→`EVT`)**, routing.
+- `toap-client` — async SDK (request/response correlation, inbound + event dispatch, `patch`/`subscribe`).
+- `toap-agents` — `agent_a`/`agent_b` (summarizer), `classifier`, and an `orchestrator` (fan-out + merge).
+- `toap-mcp` — minimal **MCP server** (JSON-RPC/stdio) exposing the context store as `toap_set`/`toap_get`.
+- `benchmark/` — tiktoken token/byte comparison vs a JSON baseline (see [docs/claims.md](docs/claims.md)).
+
+```powershell
+# This host: no MSVC; uses the bundled self-contained MinGW (configured in .cargo/config.toml).
+cargo test --workspace          # 19 tests pass
+cargo build --workspace
+
+# Live fan-out demo (4 terminals): broker, two workers, then the orchestrator
+cargo run -p toap-broker
+cargo run -p toap-agents --bin agent_b
+cargo run -p toap-agents --bin classifier
+cargo run -p toap-agents --bin orchestrator
+
+# Token benchmark (WITH vs WITHOUT TOAP)
+python benchmark/runner.py
 ```
+
+Measured (synthetic, rule-based agents): **~3.3–3.8× fewer coordination tokens** with **100% accuracy
+parity** (TOAP is content-lossless). The opcode layer alone is only ~10–17%; the win is context-by-ID
+dedup. Honest caveats in [docs/claims.md](docs/claims.md).
+
+### Intentionally deferred (roadmap)
+V2 binary control plane (N1), KV-cache bridge (research-demoted), real-LLM accuracy study, message
+signing / cross-reconnect replay nonces, Redis/WebSocket backends.
 
 ## Scope
 
@@ -76,12 +105,13 @@ Core components planned across the build phases:
 
 | Component | Role | Status |
 | --- | --- | --- |
-| Protocol core | Parse and encode V1 text messages, later V2 binary frames. | V1 implemented |
-| Broker | Own sessions, route messages, enforce identity. | Planned |
-| Context store | Persist shared data, metadata, TTL, ACL, and deltas. | Planned |
-| Security layer | Validate frames, enforce ACL and taint policy. | Planned |
-| Python SDK | Let agents use TOAP without manual wire formatting. | Planned |
-| Benchmarks | Prove or reject target savings with reproducible runs. | Planned |
+| `toap-core` | Parse and encode V1 text messages, later V2 binary frames. | **Implemented (V1)** |
+| `toap-broker` | Sessions, routing, identity, store ops, deltas, subscriptions. | **Implemented** |
+| `toap-context` | Shared data + `Reference` chooser; ACL, taint, TTL+GC, deltas. | **Implemented (in-memory)** |
+| `toap-client` | Async SDK: requests, events, `patch`, `subscribe`. | **Implemented (Rust)** |
+| `toap-security` | Rate limiter, replay guard, taint policy, ACL. | **Implemented** (replay is per-session; signing is roadmap) |
+| `toap-mcp` | Expose the context store to MCP hosts. | **Implemented (minimal)** |
+| Benchmarks | Token/byte comparison vs JSON baseline (tiktoken). | **Implemented** (synthetic; real-LLM study roadmap) |
 
 ## Protocol Direction
 
@@ -135,23 +165,19 @@ The target release candidate contains:
 
 ```text
 .
-+-- CMakeLists.txt
-+-- README.md
-+-- TEST_PLAN.md
-+-- requirements-dev.txt
-+-- protocol/
-    +-- encoder.cpp
-    +-- parser.cpp
-    +-- include/toap/
-    +-- tests/
-+-- docs/
-    +-- claims.md
-    +-- decisions.md
-    +-- protocol_v1.md
-    +-- security_model.md
++-- Cargo.toml            (workspace)
++-- .cargo/config.toml    (self-contained MinGW linking; target-dir on D:)
++-- crates/
+    +-- toap-core/        (message model, parser, encoder)
+    +-- toap-context/     (context store + Reference primitive)
+    +-- toap-wire/        (length-prefixed tokio framing)
+    +-- toap-broker/      (TCP server, sessions, routing; lib + bin + end_to_end test)
+    +-- toap-client/      (async client SDK)
+    +-- toap-agents/      (agent_a driver, agent_b summarizer)
++-- docs/                 (protocol_v1, security_model, claims, decisions)
++-- research.md, research-cot-synthesis.md   (research pass + reasoning)
++-- blueprint.md, phases.md                  (planning / source context)
 ```
-
-`blueprint.md` and `phases.md` are intentionally ignored. They are planning/source-context files, not versioned project docs.
 
 ## Documentation
 
@@ -165,21 +191,19 @@ The target release candidate contains:
 
 ## Development Setup
 
-Configure the C++ project:
+Requires Rust stable. On a Windows host without MSVC, install the GNU toolchain:
 
-```bash
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+```powershell
+rustup-init.exe -y --default-host x86_64-pc-windows-gnu --profile minimal
+rustup component add rust-mingw      # provides self-contained MinGW libs (libgcc_eh.a etc.)
 ```
 
-Install future Python development dependencies:
+`.cargo/config.toml` forces self-contained linking and puts build output on `D:` (C: is full on this host).
 
-```bash
-python -m pip install -r requirements-dev.txt
+```powershell
+cargo test --workspace
+cargo build --workspace
 ```
-
-No broker runtime command exists yet. Phase 2 only builds and tests the protocol library.
 
 ## Roadmap
 

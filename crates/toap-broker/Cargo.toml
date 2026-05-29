@@ -1,0 +1,24 @@
+[package]
+name = "toap-broker"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP broker: tokio TCP server, connection-bound sessions, routing, context store."
+
+[lib]
+name = "toap_broker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "toap-broker"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+toap-core = { workspace = true }
+toap-context = { workspace = true }
+toap-security = { workspace = true }
+toap-wire = { workspace = true }
+
+[dev-dependencies]
+toap-client = { workspace = true }

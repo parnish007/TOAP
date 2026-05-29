@@ -4,13 +4,36 @@ This file is the source of truth for project claims. If a number is not listed u
 
 ## Current Status
 
-No measured performance claims exist yet.
-
-The project is in phase 2. The V1 protocol parser and encoder exist with unit tests. There is no broker, context store, SDK, or benchmark runner.
+v1.0 (Rust). Implemented and tested: protocol core, context store (ACL/TTL/deltas), security
+(rate-limit/replay/taint), broker (sessions/routing/subscriptions), client SDK, demo agents, MCP
+frontend, and a token benchmark. **19 automated tests pass.** The first measured benchmark exists
+(below) — but it is a *synthetic simulation with rule-based agents*, not a real-LLM study.
 
 ## Measured Claims
 
-None.
+Source: `benchmark/runner.py`; tokenizer: tiktoken `cl100k_base` + `o200k_base`; baseline: A2A/
+JSON-RPC-style messages that re-embed the document each turn; hardware: Windows 11, this dev host;
+agents: **deterministic rule-based stand-ins (NOT LLMs)**; reproduce: `python benchmark/runner.py`.
+
+| Scenario | Metric | Without TOAP | With TOAP | Reduction |
+| --- | --- | --- | --- | --- |
+| multi_turn_shared_doc (8 turns, 1 doc) | tokens (cl100k) | 2,807 | 843 | 3.33× |
+| multi_turn_shared_doc | wire bytes | 12,588 | 3,137 | 4.01× |
+| fanout_5_workers (co-located store) | tokens (cl100k) | 1,760 | 459 | 3.83× |
+| fanout_5_workers (worst case: remote re-fetch) | tokens (cl100k) | 1,760 | 1,684 | 1.05× |
+| opcode vs natural language (micro) | tokens (cl100k) | — | — | 0–17% only |
+
+**Accuracy: identical (100% both)** — TOAP is content-lossless (same bytes delivered), so the
+deterministic task gives the same answers. This proves *no accuracy loss from the transport*; it is
+**not** evidence about real-LLM task accuracy (no LLM was run).
+
+### Stated limitations (next to the claim, per policy)
+- Synthetic workload, rule-based agents, one document, parameters chosen by us; baseline is a
+  reasonable but self-authored JSON re-send.
+- Savings are in **coordination/transport tokens**, NOT in the worker's own LLM *prompt* tokens
+  (unchanged once a fetched doc enters a model prompt).
+- Fan-out only wins when the store is co-located/reused; the remote-refetch row shows the weak case.
+- Opcode terseness is a minor win (≤17%); the real win is context-by-ID dedup.
 
 ## Design Targets
 
@@ -29,12 +52,11 @@ These are targets to test later:
 
 TOAP does not currently claim:
 
-- Measured 5x, 10x, or 20x savings.
-- Reduced total LLM inference tokens for every workflow.
-- Improved answer quality.
-- Production-grade security.
-- Compatibility with A2A, MCP, or any specific agent framework.
-- Working KV-cache sharing.
+- Measured 5x, 10x, or 20x savings (measured ~3–4× on the synthetic repeated-reference scenario).
+- Reduced total LLM inference tokens for every workflow (saves transport, not inference).
+- Improved answer quality, or any real-LLM accuracy result (no LLM has been run).
+- Production-grade security (replay guard is per-session only; no message signing yet).
+- Working KV-cache sharing (KV_BRIDGE is a typed stub, demoted per research.md §3).
 
 ## Required Metadata For Any Numeric Claim
 

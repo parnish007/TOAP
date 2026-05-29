@@ -1,0 +1,8 @@
+[package]
+name = "toap-context"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "TOAP shared context store + the Reference materialization primitive (N3)."
+
+[dependencies]
