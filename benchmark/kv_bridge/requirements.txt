@@ -1,0 +1,4 @@
+# KV-bridge benchmark deps. Install torch matching your CUDA (see pytorch.org).
+# RTX 3050 (CUDA 12.x):  pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.2
+transformers>=4.44

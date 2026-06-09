@@ -273,9 +273,14 @@ with a stable-prefix~$\|$~volatile-suffix layout helper; the \textbf{materializa
 graceful fallback} (KV\_BRIDGE~$\rightarrow$~CTX\_REF~$\rightarrow$~INLINE) behind a \texttt{KvTransport}
 trait; broker-derived identity, token-bucket rate limiting, per-session replay rejection,
 \texttt{msg\_id} correlation; and an MCP frontend.\\[1mm]
-\textbf{Still requires a model runtime} (interface implemented, tensor transfer not): the KV-cache
-\emph{transport} behind \texttt{KvTransport} --- with no runtime the policy correctly degrades to
-CTX\_REF (the tested default). Cross-vendor evaluation also remains future work.}
+A minimal \textbf{KV-cache transport} is now implemented as a same-model, same-tokenizer
+\emph{prefix-reuse} sidecar (\texttt{benchmark/kv\_bridge}): it extracts a shared context's KV,
+serializes/transfers it, and lets the receiver prefill only its query suffix, with a benchmark that
+measures prefill-latency saved, KV-byte-size vs.\ text-size, and exact greedy-output correctness. The
+Rust side owns the policy and fallback (\texttt{RegistryKvTransport} enforces the same-model
+constraint); the sidecar owns the tensor transport. We deliberately restrict to prefix reuse (absolute
+positions preserved) and do \emph{not} splice caches across positions. Cross-vendor evaluation remains
+future work.}
 
 \section{Implementation}\label{sec:impl}
 TOAP is a Rust workspace. \texttt{toap-core} defines the message model, a strict recursive-descent

@@ -292,6 +292,36 @@ impl KvTransport for NoopKvTransport {
     }
 }
 
+/// A real, non-stub transport backed by a KV sidecar (the Python/CUDA model runtime, see
+/// `benchmark/kv_bridge`). The sidecar registers `(ctx, model) -> handle` once it has produced and
+/// stored a reusable KV blob for that context under that model; the broker consults this registry to
+/// decide whether KV_BRIDGE is actually available. A handle is only returned when the requested
+/// `model` matches the one the KV was baked for — enforcing the same-model constraint.
+#[derive(Debug, Default)]
+pub struct RegistryKvTransport {
+    handles: HashMap<(u32, String), String>,
+}
+
+impl RegistryKvTransport {
+    pub fn new() -> Self {
+        RegistryKvTransport { handles: HashMap::new() }
+    }
+    /// The sidecar calls this after producing a KV blob for `ctx` under `model`.
+    pub fn register(&mut self, ctx: u32, model: &str, handle: &str) {
+        self.handles.insert((ctx, model.to_string()), handle.to_string());
+    }
+    /// The sidecar calls this when a context expires or its KV is evicted.
+    pub fn evict(&mut self, ctx: u32, model: &str) {
+        self.handles.remove(&(ctx, model.to_string()));
+    }
+}
+
+impl KvTransport for RegistryKvTransport {
+    fn fetch(&self, ctx: u32, model: &str) -> Option<String> {
+        self.handles.get(&(ctx, model.to_string())).cloned()
+    }
+}
+
 /// Constraint-guarded materialization with graceful fallback. Tries KV_BRIDGE only when the cost
 /// model and constraints allow AND the transport actually has a handle; otherwise falls back to the
 /// text-plane choice (CTX_REF / INLINE). Always benchmark against text+prefix-cache, never re-prefill.
@@ -632,6 +662,19 @@ mod tests {
         }
         let m2 = materialize_with_fallback(7, &big, d, "llama3-8b", &Stub);
         assert!(matches!(m2, Materialization::KvBridge { ctx: 7, .. }));
+
+        // RegistryKvTransport: bridge only when the sidecar registered THIS ctx under THIS model.
+        let mut reg = RegistryKvTransport::new();
+        reg.register(7, "llama3-8b", "blob-h7");
+        assert_eq!(reg.fetch(7, "llama3-8b").as_deref(), Some("blob-h7"));
+        assert_eq!(reg.fetch(7, "gpt2"), None); // wrong model -> no bridge (same-model constraint)
+        assert_eq!(reg.fetch(9, "llama3-8b"), None); // unregistered ctx
+        let m4 = materialize_with_fallback(7, &big, d, "llama3-8b", &reg);
+        assert!(matches!(m4, Materialization::KvBridge { ctx: 7, .. }));
+        let m5 = materialize_with_fallback(7, &big, d, "gpt2", &reg); // model mismatch -> fallback
+        assert_eq!(m5, Materialization::CtxRef(7));
+        reg.evict(7, "llama3-8b");
+        assert_eq!(reg.fetch(7, "llama3-8b"), None);
 
         // Cross-model (same_model=false) never bridges, even with a willing transport.
         let d2 = RefDecision { same_model: false, ..d };
