@@ -1,104 +1,176 @@
-# TOAP
+<div align="center">
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12,20,24&height=210&section=header&text=TOAP&fontSize=82&fontColor=fff&animation=twinkling&fontAlignY=38&desc=The+Token-Optimized+Agent+Protocol&descAlignY=58&descSize=20" width="100%"/>
+
+</div>
+
+<div align="center">
+
+[![Typing SVG](https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=18&pause=1200&color=2F6F4F&center=true&vCenter=true&width=720&lines=Store+context+once%2C+reference+it+by+ID%2C+validate+every+hop;Two-plane+wire+format%3A+bytes+for+the+broker%2C+tokens+for+the+LLM;Honest+multi-model+pilot%3A+n%3D33%2C+bias-free+scoring;Finding%3A+a+good+summarizer+BEATS+TOAP+on+tokens+%E2%80%94+we+say+so;28+tests+passing+%7C+broker-derived+identity+%7C+capability+lattice)](https://git.io/typing-svg)
+
+</div>
+
+<br/>
 
 <div align="center">
 
 ![Status](https://img.shields.io/badge/status-v1.0_working-2F855A?style=for-the-badge)
 ![Rust](https://img.shields.io/badge/Rust-stable-DEA584?style=for-the-badge&logo=rust&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-28_passing-4A5568?style=for-the-badge)
-![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
-![Claims](https://img.shields.io/badge/claims-measured_only-4A5568?style=for-the-badge)
-
-**Token-Optimized Agent Protocol**
-
-Compact agent-to-agent messages, shared context references, and broker-enforced trust boundaries for multi-agent LLM systems.
-
-[Status](#status) | [Paper](#paper) | [Scope](#scope) | [Architecture](#architecture) | [Protocol](#protocol-direction) | [Docs](#documentation)
+![Tests](https://img.shields.io/badge/tests-28_passing-22C55E?style=for-the-badge&logo=checkmarx&logoColor=white)
+![Pilot](https://img.shields.io/badge/multi--model_pilot-Haiku·Sonnet·Opus-7C3AED?style=for-the-badge)
+![License](https://img.shields.io/badge/code-MIT-1682D4?style=for-the-badge)
+![Paper](https://img.shields.io/badge/paper-CC--BY--4.0-EF4444?style=for-the-badge)
 
 </div>
 
-> **Paper:** *TOAP: The Token-Optimized Agent Protocol — A Reference-Minimized, Two-Plane Architecture
-> for Inter-Agent Messaging, with an Honest Token Accounting and a Multi-Model Pilot.*
-> See [`paper/main.pdf`](paper/main.pdf) (sources in [`paper/`](paper/)). Zenodo DOI: _to be added on release._
+<br/>
 
-## Status
+<div align="center">
 
-TOAP is at **v1.0 (Rust)**. The stack was rewritten from the original C++ prototype following the
-research pass — see the corrected design and evidence in [research.md](research.md).
+[**Quick Start**](#-quick-start) · [**Why**](#-the-problem-context-re-transmission) · [**Benchmarks**](#-benchmark-results-honest) · [**Architecture**](#-architecture) · [**Protocol**](#protocol-direction) · [**Docs**](#-documentation)
 
-What works today (**28 tests passing**, plus live multi-process demos and benchmarks):
+</div>
 
-- `toap-core` — V1 text message model, parser, encoder, **+ V2 binary control-plane codec** (two-plane design).
-- `toap-context` — context store + the `Reference` materialization spectrum with graceful fallback,
-  **per-context ACL, capability-lattice provenance, TTL+GC, field deltas, cache-coordinate layout**.
-- `toap-security` — **token-bucket rate limiter, per-session replay guard, capability/taint policy**.
-- `toap-wire` — length-prefixed tokio framing.
-- `toap-broker` — tokio TCP server, SYN/ACK sessions, **broker-derived identity**, store ops with ACL,
-  **capability-lattice enforcement**, rate-limit, replay rejection, **deltas (`DLT`) + subscriptions (`SUB`→`EVT`)**, routing.
-- `toap-client` — async SDK (request/response correlation, inbound + event dispatch, `patch`/`subscribe`).
-- `toap-agents` — `agent_a`/`agent_b` (summarizer), `classifier`, and an `orchestrator` (fan-out + merge).
-- `toap-mcp` — minimal **MCP server** (JSON-RPC/stdio) exposing the context store as `toap_set`/`toap_get`.
-- `benchmark/` — tiktoken token/byte comparisons and the multi-model A/B study behind the paper.
+<div align="center">
 
-```powershell
-cargo build --workspace
-cargo test --workspace          # 28 tests pass
+> **Author:** Trilochan Sharma — Independent Researcher · [@parnish007](https://github.com/parnish007)
+> **Paper:** [`paper/main.pdf`](paper/main.pdf) — *A Reference-Minimized, Two-Plane Architecture for Inter-Agent Messaging.* · **Zenodo DOI:** _to be minted on release_
 
-# Live fan-out demo (4 terminals): broker, two workers, then the orchestrator
-cargo run -p toap-broker
-cargo run -p toap-agents --bin agent_b
-cargo run -p toap-agents --bin classifier
-cargo run -p toap-agents --bin orchestrator
+</div>
 
-# Benchmarks (Python: pip install -r requirements-dev.txt)
-python benchmark/runner.py                       # wire-token comparison vs JSON baseline
-python benchmark/ab_study/compute_writer.py      # multi-model A/B study (n=33)
-```
+---
 
-**Headline results (honest, reproducible).** In a controlled multi-model study (real Haiku/Sonnet/Opus
-generations, deterministic bias-free scoring, n=33), both reference-minimization and a competent
-summarizing orchestrator cut downstream tokens at **full accuracy parity**, and — importantly — a
-**summarizing baseline (~2.5×) beats TOAP referencing (~1.9×)** on tokens. TOAP therefore earns its
-place not through raw token savings but through **losslessness, in-band security, and systematization**
-(see the paper). Symbolic opcodes save 50% of *bytes* but only 0–17% of *tokens*. Full caveats in
-[docs/claims.md](docs/claims.md).
+## 🧩 The Problem: Context Re-Transmission
 
-### Implemented vs. roadmap
-Implemented: V1 text + V2 binary planes, context store (ACL/TTL/deltas/subscriptions), capability
-lattice, materialization policy with fallback, rate-limit/replay, MCP frontend. Roadmap (needs a model
-runtime or external models): the actual **KV-cache tensor transport** (only the policy/trait exists),
-**cross-vendor** real-LLM replication, message signing / cross-reconnect replay nonces, Redis/WebSocket
-backends.
+In multi-agent LLM pipelines, an orchestrator hands a document to a summarizer, then a classifier, then a writer — and the **same context is re-sent on every hop**. Token cost grows with pipeline depth, and there is no structural guard on *what untrusted content is allowed to do* as it travels.
 
-## Scope
-
-TOAP is a low-level communication layer for multi-agent systems. Its purpose is to reduce repeated coordination overhead by letting agents send compact operations and context IDs instead of repeatedly copying large documents or verbose natural-language instructions.
-
-TOAP focuses on:
-
-| Area | What TOAP Provides |
-| --- | --- |
-| Message format | Compact, deterministic request and response payloads. |
-| Context sharing | Store shared data once, then reference it as `CTX:N`. |
-| Routing | Broker-mediated agent-to-agent delivery. |
-| Identity | Source identity derived from broker session state. |
-| Security | ACL, taint, rate-limit, and strict protocol validation. |
-| Measurement | Benchmarks that separate wire bytes, protocol tokens, model input tokens, and latency. |
-
-TOAP does **not** replace MCP, A2A, LangChain, AutoGen, CrewAI, or an LLM runtime. It can sit below or beside those systems as a compact payload and routing protocol.
-
-## Why This Exists
-
-Multi-agent LLM systems often resend the same context through several agents: an orchestrator sends a document to a summarizer, a classifier, a writer, and a reviewer. That increases network bytes, protocol tokens, logs, storage pressure, and security exposure.
-
-TOAP's design goal is simple:
+**TOAP's design goal is one line:**
 
 ```text
 Send the data once. Refer to it many times. Validate every hop.
 ```
 
-The project is careful about claims: TOAP can reduce wire/message overhead when references replace repeated content. It does not automatically reduce total LLM inference tokens if an agent still fetches a context and places it into a model prompt. Those savings require additional strategies such as retrieval, summarization, caching, or future KV-cache work.
+Content is stored once and exchanged by **reference** (`CTX:N`); a byte-optimized **control plane** (read by the broker) is separated from a tokenizer-aligned **semantic plane** (read by the LLM); and a **capability lattice** rides with each reference so the broker can refuse, e.g., an `EXEC`/`PAY`/`DELETE` driven by user-originated content.
 
-## Architecture
+<table align="center">
+<tr>
+<td align="center" width="25%">🔗<br/><b>Reference, don't re-send</b><br/><sub>store once, pass <code>CTX:N</code></sub></td>
+<td align="center" width="25%">🧮<br/><b>Two-plane format</b><br/><sub>bytes for broker,<br/>tokens for the LLM</sub></td>
+<td align="center" width="25%">🛡️<br/><b>Capability lattice</b><br/><sub>provenance travels<br/>with the reference</sub></td>
+<td align="center" width="25%">📏<br/><b>Honest accounting</b><br/><sub>bytes ≠ tokens;<br/>we report both</sub></td>
+</tr>
+</table>
+
+> **The honest headline:** a competent summarizing orchestrator *beats* TOAP referencing on tokens (~2.5× vs ~1.9×) **at equal accuracy**. TOAP earns its place through **losslessness, in-band security, and systematization** — not raw token savings. The paper argues this against itself; see [Benchmarks](#-benchmark-results-honest).
+
+## ⚡ Quick Start
+
+> Requires a Rust toolchain (`rustup default stable`). No API keys needed — the broker, store, and benchmarks run with no external LLM.
+
+```bash
+git clone https://github.com/parnish007/TOAP.git
+cd TOAP
+cargo build --workspace
+cargo test  --workspace          # 28 tests pass
+```
+
+**Live fan-out demo** (4 terminals): broker, two workers, then the orchestrator —
+the document is stored once and dispatched **by reference** to both workers:
+
+```bash
+cargo run -p toap-broker
+cargo run -p toap-agents --bin agent_b
+cargo run -p toap-agents --bin classifier
+cargo run -p toap-agents --bin orchestrator
+```
+
+**Reproduce the benchmarks** (`pip install -r requirements-dev.txt`):
+
+```bash
+python benchmark/runner.py                    # wire-token comparison vs JSON baseline
+python benchmark/ab_study/compute_writer.py   # multi-model A/B study (n=33)
+```
+
+**Use it as an MCP server** (exposes the context store to Claude Desktop / Cursor / VS Code):
+
+```bash
+cargo run -p toap-mcp                          # JSON-RPC over stdio: toap_set / toap_get
+```
+
+---
+
+## 🧱 What's in the Box
+
+| Crate | Role |
+|:---|:---|
+| `toap-core` | V1 text + **V2 binary control-plane** codecs, parser, encoder |
+| `toap-context` | Context store + `Reference` spectrum w/ fallback · ACL · **capability lattice** · TTL+GC · deltas · cache layout |
+| `toap-security` | Token-bucket rate limiter · per-session replay guard · capability/taint policy |
+| `toap-wire` | Length-prefixed Tokio framing |
+| `toap-broker` | Async TCP server · **broker-derived identity** · ACL + capability enforcement · routing · deltas · `SUB`→`EVT` |
+| `toap-client` | Async SDK — requests, events, `patch`, `subscribe` |
+| `toap-agents` | `agent_a`/`agent_b` summarizer · `classifier` · `orchestrator` (fan-out + merge) |
+| `toap-mcp` | Minimal MCP stdio server over the context store |
+
+---
+
+## 📊 Benchmark Results (Honest)
+
+### Tokens: a summarizing baseline *beats* TOAP — and we report it
+
+Controlled multi-agent writer task, **real Haiku/Sonnet/Opus generations**, **n=33**, scored by a
+**deterministic, model-independent** rubric checker (no LLM-judge bias). Reduction is vs. the naive
+"re-send the whole transcript" baseline; **all 33 samples scored 4/4 (full accuracy parity).**
+
+```mermaid
+xychart-beta
+    title "Downstream token reduction vs naive transcript (higher = fewer tokens)"
+    x-axis ["Haiku", "Sonnet", "Opus"]
+    y-axis "x reduction" 0 --> 3
+    bar [2.39, 2.62, 2.60]
+    bar [1.88, 1.93, 1.92]
+```
+
+| Model | Naive (baseline) | **Summarizing orchestrator** | **TOAP reference** | Accuracy |
+|:---|:---:|:---:|:---:|:---:|
+| Haiku | 1.00× | **2.39×** | 1.88× | 4/4 |
+| Sonnet | 1.00× | **2.62×** | 1.93× | 4/4 |
+| Opus | 1.00× | **2.60×** | 1.92× | 4/4 |
+
+> **Why TOAP still matters:** the summary is *lossy* (a dropped detail is gone); a TOAP reference is
+> *lossless* (re-expandable on demand), carries provenance/identity for security, and systematizes the
+> behavior across heterogeneous agents. The token result is the paper's most honest finding — we argue
+> against our own headline rather than for it.
+
+### Bytes are not tokens (the "token-optimized" caveat)
+
+Symbolic opcodes look terse but BPE taxes punctuation: **~50% byte savings collapse to 0–17% token savings.**
+
+```mermaid
+xychart-beta
+    title "Symbolic opcode vs natural language (tiktoken cl100k)"
+    x-axis ["ex1", "ex2", "ex3", "ex4"]
+    y-axis "% reduction vs NL" 0 --> 60
+    bar [50, 50, 38, 37]
+    bar [17, 14, 0, 0]
+```
+
+The real win is **content referencing**, not encoding tricks. Full method, caveats, and per-cell data:
+[`paper/main.pdf`](paper/main.pdf) · [`docs/claims.md`](docs/claims.md) · [`benchmark/ab_study/`](benchmark/ab_study/).
+
+### Implemented vs. roadmap
+
+**Implemented (28 tests):** V1 text + V2 binary planes · context store (ACL, capability lattice, TTL,
+deltas, subscriptions) · broker routing + security enforcement · client SDK · MCP frontend · benchmarks.
+**Roadmap (needs a model runtime / external models):** KV-cache **tensor transport** (only the
+`KvTransport` policy/trait exists today) · **cross-vendor** real-LLM replication · message signing /
+cross-reconnect nonces · Redis/WebSocket backends.
+
+## 🎯 Scope
+
+TOAP is a low-level **agent-to-agent** communication layer: compact operations and context IDs instead of repeatedly copying large documents or verbose natural-language instructions. It does **not** replace MCP, A2A, LangChain, AutoGen, CrewAI, or an LLM runtime — it can sit below or beside them as a compact payload + routing layer. It reduces *coordination/transport* tokens; it does **not** by itself reduce a worker's own prompt tokens once a fetched context enters a model prompt (those need retrieval/summarization/caching).
+
+## 🏗️ Architecture
 
 ```mermaid
 flowchart TD
@@ -108,34 +180,26 @@ flowchart TD
     B --> S["Shared Context Store"]
     B --> P["Security Policy"]
     P --> ACL["ACL Checks"]
-    P --> T["Taint Rules"]
-    P --> R["Rate Limits"]
-    S --> DLT["Delta Log"]
+    P --> T["Capability Lattice"]
+    P --> R["Rate Limit · Replay Guard"]
+    S --> DLT["Delta Log · Subscriptions"]
     B --> M["Metrics and Logs"]
 ```
 
-Core components planned across the build phases:
+The byte and token **planes** have opposite cost functions and different readers, so TOAP separates a compact **control plane** (ids, session, ACL, capability tag, nonce — read by the broker) from a tokenizer-aligned **semantic plane** (`OP(args)?opts` — read by the LLM). Full design rationale is in [`paper/main.pdf`](paper/main.pdf) and [`docs/decisions.md`](docs/decisions.md).
 
-| Component | Role | Status |
-| --- | --- | --- |
-| `toap-core` | V1 text + V2 binary control-plane codecs, parser, encoder. | **Implemented** |
-| `toap-broker` | Sessions, routing, identity, store ops, capability enforcement, deltas, subscriptions. | **Implemented** |
-| `toap-context` | Store + `Reference` spectrum/fallback; ACL, capability lattice, TTL+GC, deltas, cache layout. | **Implemented (in-memory)** |
-| `toap-client` | Async SDK: requests, events, `patch`, `subscribe`. | **Implemented** |
-| `toap-security` | Rate limiter, replay guard, capability/taint policy. | **Implemented** (replay per-session; signing is roadmap) |
-| `toap-mcp` | Expose the context store to MCP hosts. | **Implemented (minimal)** |
-| Benchmarks | tiktoken wire comparison + multi-model A/B study. | **Implemented** (cross-vendor real-LLM study is roadmap) |
-| KV-cache tensor transport | `KvTransport` trait + fallback policy. | **Interface only** (needs a model runtime) |
+<a name="protocol-direction"></a>
 
-## Protocol Direction
+<details>
+<summary><b>📡 Protocol (V1 wire format)</b></summary>
 
-V1 uses a text frame:
+<br/>
+
+V1 uses a text frame; identity is **never** trusted from the wire (the broker derives it from the session):
 
 ```text
 TYPE|MSG_ID|TARGET|PAYLOAD
 ```
-
-Source identity is **not** trusted from the wire. The broker derives source identity from the accepted session.
 
 Payloads use function-style syntax to avoid ambiguous colon parsing:
 
@@ -147,25 +211,29 @@ OK(CTX:87)
 PATCH(CTX:42)?field=status&value=approved
 ```
 
-See [docs/protocol_v1.md](docs/protocol_v1.md) for the current protocol contract.
+V2 adds a compact **binary** control-plane codec that round-trips the same model. Full contract → [`docs/protocol_v1.md`](docs/protocol_v1.md).
 
-## Security Model
+</details>
 
-TOAP treats all peer-agent messages as untrusted. The broker is responsible for identity, routing, ACL checks, taint rules, and rate limits.
+<details>
+<summary><b>🛡️ Security model</b></summary>
 
-Important protocol decisions:
+<br/>
 
-- Agents cannot claim a trusted `SRC` field in V1; identity is broker-derived from the session.
-- Trust is broker-policy-derived, not self-declared by agents.
-- External/user-originated context carries a **capability-lattice** provenance; the broker refuses
-  operations the provenance forbids (e.g. `EXEC`/`PAY`/`DELETE` on user-origin content).
-- Normal documents containing SQL, HTML, markdown, code, or prompt-like text are treated as data, not automatically rejected.
-- Per-agent token-bucket rate limiting and per-session replay rejection are broker-enforced.
-- Numeric performance claims must come from reproducible benchmarks ([docs/claims.md](docs/claims.md)).
+TOAP treats all peer-agent messages as untrusted; the broker is the enforcement point.
 
-See [docs/security_model.md](docs/security_model.md) and [docs/decisions.md](docs/decisions.md).
+- Agents cannot claim a trusted `SRC` field; identity is **broker-derived** from the session.
+- Trust is broker-policy-derived, not self-declared.
+- External/user-originated context carries a **capability-lattice** provenance; the broker refuses operations the provenance forbids (e.g. `EXEC`/`PAY`/`DELETE` on user-origin content → `ERR NOPERM reason=capability_denied`).
+- Normal documents containing SQL, HTML, markdown, code, or prompt-like text are treated as **data**, not auto-rejected.
+- Per-agent token-bucket **rate limiting** and per-session **replay rejection** are broker-enforced.
+- Numeric performance claims must come from reproducible benchmarks.
 
-## Repository Layout
+Details → [`docs/security_model.md`](docs/security_model.md) · [`docs/decisions.md`](docs/decisions.md).
+
+</details>
+
+## 📂 Repository Layout
 
 ```text
 .
@@ -186,17 +254,19 @@ See [docs/security_model.md](docs/security_model.md) and [docs/decisions.md](doc
 +-- research.md, research-cot-synthesis.md   (research pass + reasoning)
 ```
 
-## Documentation
+## 📚 Documentation
 
-| Document | Use It For |
+| Document | Start here if… |
 | --- | --- |
-| [docs/protocol_v1.md](docs/protocol_v1.md) | Exact V1 frame, payload syntax, examples, and validation rules. |
-| [docs/security_model.md](docs/security_model.md) | Identity, sessions, trust, ACL, taint, injection handling, logging. |
-| [docs/claims.md](docs/claims.md) | Measured claims, targets, non-claims, and publication rules. |
-| [docs/decisions.md](docs/decisions.md) | Engineering decisions and rationale. |
-| [TEST_PLAN.md](TEST_PLAN.md) | Verification plan for protocol, broker, store, SDK, security, and benchmarks. |
+| [`paper/main.pdf`](paper/main.pdf) | You want the full design, method, and honest results in one place. |
+| [docs/protocol_v1.md](docs/protocol_v1.md) | You need the exact V1 frame, payload syntax, and validation rules. |
+| [docs/security_model.md](docs/security_model.md) | You want identity, ACL, capability lattice, rate-limit, replay. |
+| [docs/claims.md](docs/claims.md) | You want the measured-claims ledger and what is *not* claimed. |
+| [docs/decisions.md](docs/decisions.md) | You want the engineering decisions and rationale. |
+| [benchmark/ab_study/](benchmark/ab_study/) | You're reproducing the multi-model A/B study (run records + scorer). |
+| [TEST_PLAN.md](TEST_PLAN.md) | You want the verification plan across protocol, broker, store, security. |
 
-## Development Setup
+## 🔧 Development Setup
 
 Requires Rust stable. The repo builds on any platform with a standard toolchain
 (`rustup default stable`). On a Windows host without MSVC, use the GNU toolchain:
@@ -213,25 +283,49 @@ cargo test --workspace          # 28 tests
 
 Python benchmarks: `pip install -r requirements-dev.txt` (tiktoken + matplotlib).
 
-## Roadmap
+## 🗺️ Roadmap
 
-Done: V1/V2 protocol, context store (ACL, capability lattice, TTL, deltas, subscriptions), broker
-routing + security enforcement, client SDK, MCP frontend, multi-model benchmark, paper. Next:
-KV-cache tensor transport (needs a model runtime), cross-vendor real-LLM replication, message
-signing / cross-reconnect nonces, Redis/WebSocket backends.
+**Done:** V1/V2 protocol · context store (ACL, capability lattice, TTL, deltas, subscriptions) · broker
+routing + security enforcement · client SDK · MCP frontend · multi-model benchmark · paper.
+**Next:** KV-cache **tensor transport** (needs a model runtime) · **cross-vendor** real-LLM replication ·
+message signing / cross-reconnect nonces · Redis/WebSocket backends.
 
-## Citing
-
-If you use TOAP, please cite via [`CITATION.cff`](CITATION.cff) (a Zenodo DOI will be minted on
-release). The paper is in [`paper/`](paper/).
-
-## License
-
-Code is licensed under the [MIT License](LICENSE). The paper (`paper/`) is licensed under
-[CC-BY-4.0](paper/LICENSE).
-
-## Claim Policy
+## 🧭 Claim Policy
 
 No numeric savings are accepted as project facts until the benchmark suite records the result with
-commit hash, hardware, tokenizer/model details, baseline, raw output, and summary table.
-See [docs/claims.md](docs/claims.md).
+commit hash, hardware, tokenizer/model details, baseline, raw output, and summary table —
+see [`docs/claims.md`](docs/claims.md). This README reports only measured, reproducible numbers,
+including the result that a summarizing baseline beats TOAP on tokens.
+
+## 📦 Citation
+
+If you use TOAP in your research, please cite it (see also [`CITATION.cff`](CITATION.cff)):
+
+```bibtex
+@software{sharma_2026_toap,
+  author    = {Sharma, Trilochan},
+  title     = {{TOAP: The Token-Optimized Agent Protocol}},
+  year      = {2026},
+  publisher = {Zenodo},
+  url       = {https://github.com/parnish007/TOAP}
+}
+```
+
+> A Zenodo DOI will be minted on release and added here as a badge.
+
+## 📄 License
+
+Code is licensed under the [MIT License](LICENSE). The paper ([`paper/`](paper/)) is licensed under
+[CC-BY-4.0](paper/LICENSE).
+
+---
+
+<div align="center">
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=12,20,24&height=120&section=footer&animation=twinkling" width="100%"/>
+
+*TOAP — store the data once, reference it many times, validate every hop.*
+
+**Built by [Trilochan Sharma (@parnish007)](https://github.com/parnish007)**
+
+</div>
