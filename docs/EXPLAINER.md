@@ -1,12 +1,12 @@
 # TOAP, Explained — Top to Bottom
 
 A plain-language walkthrough of what TOAP is, how every layer works, and — just as
-importantly — where it wins, where it loses, and why. This is the document to read if you want
-to *understand* the system before reading the paper or the code.
+importantly — where it wins, where it loses, and why. Read this if you want to *understand* the
+system before the paper or the code.
 
-> One-line summary: **TOAP is a state-management protocol for multi-agent LLM systems built on
-> one idea — store content once, pass references everywhere — with a two-plane wire format, a
-> reference-materialization spectrum, and capability-lattice security attached to every context.**
+> **One-line summary:** TOAP is a state-management protocol for multi-agent LLM systems built on one
+> idea — *store content once, pass references everywhere* — with a two-plane wire format, a
+> reference-materialization spectrum, and capability-lattice security attached to every context.
 
 ---
 
@@ -14,27 +14,33 @@ to *understand* the system before reading the paper or the code.
 
 Multi-agent pipelines have a quiet, expensive habit: they re-send the same context on every hop.
 
-Without TOAP, the transcript grows at every step:
-
+```mermaid
+flowchart LR
+    subgraph WITHOUT ["Without TOAP — transcript grows every hop"]
+        direction LR
+        D0[doc] --> A1[Agent 1]
+        A1 -- "doc + out1" --> A2[Agent 2]
+        A2 -- "doc + out1 + out2" --> A3[Agent 3]
+        A3 -- "doc + out1 + out2 + out3" --> A4[Agent 4]
+    end
+    classDef grow fill:#ffe3e3,stroke:#c92a2a,color:#1a1a2e;
+    class A1,A2,A3,A4 grow
 ```
-Agent 1   receives:  Document
-Agent 2   receives:  Document + Agent1 output
-Agent 3   receives:  Document + Agent1 output + Agent2 output
-Agent 4   receives:  Document + Agent1 output + Agent2 output + Agent3 output
-                     \_____________________  _____________________/
-                                           \/
-                          cost grows with depth (token explosion)
-```
 
-With TOAP, the content lives once in a shared store and only **IDs** travel:
+Token cost grows with pipeline depth — a *token explosion*. With TOAP, the content lives once in a
+shared store and only **IDs** travel:
 
-```
-Document  ──store──▶  CTX:1
-
-Agent 1   ──▶  CTX:1
-Agent 2   ──▶  CTX:1
-Agent 3   ──▶  CTX:1
-Agent 4   ──▶  CTX:1
+```mermaid
+flowchart LR
+    DOC[Document] -->|store once| S[(Context Store<br/>CTX:1)]
+    S -.->|CTX:1| A1[Agent 1]
+    S -.->|CTX:1| A2[Agent 2]
+    S -.->|CTX:1| A3[Agent 3]
+    S -.->|CTX:1| A4[Agent 4]
+    classDef store fill:#f3f0ff,stroke:#7048e8,color:#1a1a2e;
+    classDef agent fill:#e7f5ff,stroke:#1971c2,color:#1a1a2e;
+    class S store
+    class A1,A2,A3,A4 agent
 ```
 
 That is the whole intuition. Everything else in TOAP exists to make that idea **safe**,
@@ -60,48 +66,55 @@ Think "operating-system-style messaging layer for agents," not "another prompt-c
 
 TOAP is layered. A message travels down the stack on the way out and up the stack on the way in.
 
-```
-┌───────────────────────────────────────────────┐
-│  Agents          LLMs / tools / rule-based      │   what does the work
-├───────────────────────────────────────────────┤
-│  TOAP Client     thin SDK                        │   hides the protocol
-├───────────────────────────────────────────────┤
-│  Protocol        V1 text  /  V2 binary codec     │   encode / validate
-├───────────────────────────────────────────────┤
-│  Security        identity · ACL · capability     │   allow / refuse
-├───────────────────────────────────────────────┤
-│  Broker / Router sessions · routing · fan-out    │   deliver / correlate
-├───────────────────────────────────────────────┤
-│  Context Store   CTX:N → content + metadata      │   store once
-├───────────────────────────────────────────────┤
-│  Transport       length-prefixed TCP             │   move bytes
-└───────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    L1["<b>Agents</b><br/>LLMs · tools · rule-based — <i>what does the work</i>"]
+    L2["<b>TOAP Client</b><br/>thin async SDK — <i>hides the protocol</i>"]
+    L3["<b>Protocol</b><br/>V1 text · V2 binary codec — <i>encode / validate</i>"]
+    L4["<b>Security</b><br/>identity · ACL · capability · rate · replay — <i>allow / refuse</i>"]
+    L5["<b>Broker / Router</b><br/>sessions · routing · fan-out — <i>deliver / correlate</i>"]
+    L6["<b>Context Store</b><br/>CTX:N → content + metadata — <i>store once</i>"]
+    L7["<b>Transport</b><br/>length-prefixed TCP — <i>move bytes</i>"]
+    L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> L7
+    classDef a fill:#e7f5ff,stroke:#1971c2,color:#111;
+    classDef b fill:#fff4e6,stroke:#e8590c,color:#111;
+    classDef c fill:#e6fcf5,stroke:#0ca678,color:#111;
+    classDef d fill:#f3f0ff,stroke:#7048e8,color:#111;
+    class L1 a
+    class L2,L3 c
+    class L4 b
+    class L5 c
+    class L6,L7 d
 ```
 
-Each layer below is explained in detail, with what it does, the relevant code, and its trade-offs.
+Each layer is explained below, with what it does, the relevant code, and its trade-offs.
 
 ---
 
 ## 3. Layer 1 — Agents
 
 At the top are the agents. They can be LLMs, rule-based workers, tools, or MCP-connected agents.
+**The key rule: agents never talk to each other directly.** Everything goes through the broker —
+this is what makes identity un-spoofable (Layer 4) and routing uniform (Layer 5).
 
+```mermaid
+flowchart LR
+    A[Agent A] <--> BR((Broker))
+    B[Agent B] <--> BR
+    C[Agent C] <--> BR
+    A -. "no direct path" .- B
+    B -. "no direct path" .- C
+    classDef agent fill:#e7f5ff,stroke:#1971c2,color:#111;
+    class A,B,C agent
+    linkStyle 3,4 stroke:#e03131,stroke-dasharray:3;
 ```
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│ Agent A  │  │ Agent B  │  │ Agent C  │
-└──────────┘  └──────────┘  └──────────┘
-```
 
-**The key rule: agents never talk to each other directly.** Everything goes through the broker.
-This is deliberate — it is what makes identity un-spoofable (Layer 4) and routing uniform (Layer 5).
+In the repo the demo agents are in `crates/toap-agents`: `agent_b` (summarizer, `SUM`), `classifier`
+(rule-based, `CLS`), and `orchestrator` (stores a document once, fans it out by reference).
 
-In the repo, the demo agents are in `crates/toap-agents`:
-- `agent_b` — a summarizer (`SUM`)
-- `classifier` — a rule-based classifier (`CLS`)
-- `orchestrator` — stores a document once and fans it out to both workers by reference
-
-**Pros:** agents stay simple; they don't manage transport, retries, or identity.
-**Cons:** the broker is a central dependency — if it's down, nobody talks (see Layer 5 cons).
+| Pros | Cons |
+|---|---|
+| Agents stay simple — no transport, retries, or identity to manage | The broker is a central dependency: if it's down, nobody talks (see Layer 5 cons) |
 
 ---
 
@@ -117,151 +130,138 @@ let summary = client.get_context(reply.payload.first_ctx().unwrap()).await?;
 client.subscribe(cid).await?;                  // get EVT notifications on changes
 ```
 
-The client (`crates/toap-client`) handles:
-- the SYN/ACK handshake that binds identity to the connection,
-- request/response correlation by `msg_id` (so concurrent requests don't get crossed),
-- a separate inbound channel for events (`recv_event`) vs. requests (`recv`).
+The client (`crates/toap-client`) performs the SYN/ACK handshake that binds identity to the
+connection, correlates each reply to its request by `msg_id`, and separates inbound **events**
+(`recv_event`) from inbound **requests** (`recv`).
 
-```
-Agent
-  │  client.send_request(...)
-  ▼
-TOAP Client  ──── correlates reply by msg_id ────▶  back to the right await point
+```mermaid
+sequenceDiagram
+    participant Ag as Agent
+    participant Cl as TOAP Client
+    participant Br as Broker
+    Ag->>Cl: send_request(target, payload)
+    Cl->>Br: REQ | msg_id=100 | target | SUM(CTX:1)
+    Br-->>Cl: RES | msg_id=100 | OK(CTX:2)
+    Cl-->>Ag: reply routed back to the right await (by msg_id)
 ```
 
-**Pros:** agent code is a handful of calls; protocol details are invisible.
-**Cons:** today there is only a Rust SDK. Other languages must speak the wire format directly
-(the format is simple text, so this is feasible, but there's no Python/JS client yet).
+| Pros | Cons |
+|---|---|
+| Agent code is a handful of calls; protocol is invisible | Only a Rust SDK today — other languages must speak the (simple, text) wire format directly |
 
 ---
 
 ## 5. Layer 3 — Protocol Layer
 
-This is where a message becomes bytes (and back). It does validation, serialization, parsing,
-and encoding. TOAP has two wire versions.
+Where a message becomes bytes (and back): validation, serialization, parsing, encoding. TOAP has two
+wire versions.
 
 ### V1 — text
 
-Human-readable, easy to debug. The frame is four pipe-separated fields:
+Human-readable, easy to debug. Four pipe-separated fields, function-style payload:
 
-```
+```text
 TYPE | MSG_ID | TARGET | PAYLOAD
-```
 
-and the payload is function-style to avoid ambiguous colons:
-
-```
 REQ|100|agentB|SUM(CTX:42)?max_words=150&lang=en
 RES|100|agentA|OK(CTX:87)
 DLT|101|broker|PATCH(CTX:42)?field=status&value=approved
 ```
 
-Why function-style? Because an earlier `SUM:CTX:42` shape is ambiguous — `CTX:42` already contains
-a colon. `OP(args)?key=value` makes positional args and options unambiguous. The parser
-(`crates/toap-core`) is **strict about protocol grammar** but **never rejects ordinary content** for
-"looking dangerous" — SQL, HTML, code, and even "ignore previous instructions" are valid *data*.
+Why function-style? Because `SUM:CTX:42` is ambiguous — `CTX:42` already contains a colon.
+`OP(args)?key=value` makes positional args and options unambiguous. The parser (`crates/toap-core`)
+is **strict about protocol grammar** but **never rejects ordinary content** — SQL, HTML, code, and
+even "ignore previous instructions" are valid *data*.
 
 ### V2 — binary control plane
 
 A compact binary header for the control fields, with the semantic payload kept as text. It
-round-trips the exact same message model (`crates/toap-core/src/v2.rs`):
+round-trips the same message model (`crates/toap-core/src/v2.rs`):
 
-```
-byte 0      version (0x02)
-byte 1      message type
-byte 2..6   msg_id (u32, big-endian)
-byte 6      flags (e.g. tainted)
-byte 7      target length
-byte 8..    target
-next 2      payload length (u16)
-next N      payload bytes  ← the semantic plane stays here
+```mermaid
+flowchart LR
+    subgraph V2 ["V2 binary frame"]
+        direction LR
+        H["version · type · msg_id · flags · target-len · target · payload-len"]
+        P["payload bytes<br/>(semantic plane — stays text)"]
+        H --> P
+    end
+    classDef ctl fill:#e7f5ff,stroke:#1971c2,color:#111;
+    classDef sem fill:#e6fcf5,stroke:#0ca678,color:#111;
+    class H ctl
+    class P sem
 ```
 
-**Pros:** text V1 is trivial to inspect and log; binary V2 shrinks the control overhead and is the
-foundation of the two-plane design (Section 9).
-**Cons:** two formats to maintain; V2 negotiation/upgrade is not yet a full handshake feature.
+| Pros | Cons |
+|---|---|
+| V1 text is trivial to inspect/log; V2 binary shrinks control overhead and enables the two-plane design | Two formats to maintain; V2 negotiation/upgrade isn't yet a full handshake feature |
 
 ---
 
 ## 6. Layer 4 — Security Filter
 
-One of the most interesting layers. Before a message is routed, it passes a filter that asks four
-questions. (Implementations: `crates/toap-security` + enforcement in `crates/toap-broker`.)
+Before a message is routed, it passes a filter that asks four questions. (Code: `crates/toap-security`
++ enforcement in `crates/toap-broker`.)
 
-```
-Agent message
-     │
-     ▼
-┌───────────────── Security Filter ─────────────────┐
-│  1. Identity      who is really sending?            │
-│  2. ACL           may they read / write / delete?   │
-│  3. Capability    may THIS content reach THIS op?   │
-│  4. Rate / Replay too fast?  a duplicate?           │
-└────────────────────────────────────────────────────┘
-     │  allow                          │  refuse
-     ▼                                  ▼
-   Broker                          ERR (NOPERM / RATE / REPLAY)
+```mermaid
+flowchart TB
+    IN["Incoming message"] --> Q1{"1 · Identity<br/>who is really sending?"}
+    Q1 -->|ok| Q2{"2 · ACL<br/>may they read/write/delete?"}
+    Q2 -->|ok| Q3{"3 · Capability<br/>may THIS content reach THIS op?"}
+    Q3 -->|ok| Q4{"4 · Rate / Replay<br/>too fast? a duplicate?"}
+    Q4 -->|ok| ROUTE["Routed to broker"]
+    Q1 -->|fail| X["REFUSED · typed error"]
+    Q2 -->|fail| X
+    Q3 -->|fail| X
+    Q4 -->|fail| X
+    classDef ok fill:#ebfbee,stroke:#2f9e44,color:#111;
+    classDef bad fill:#fff5f5,stroke:#e03131,color:#111;
+    class ROUTE ok
+    class X bad
 ```
 
 ### 4.1 Identity — broker-derived, never claimed
-
 The wire frame has **no `SRC` field**. The broker binds one `agent_id` to the connection at SYN and
-uses that for routing, ACL, logs, and rate limits. A responder replies to the original `msg_id`, so
-it never even learns who asked. This structurally defeats source-spoofing (a known weakness of
-protocols where agents self-assert identity).
+uses that for routing, ACL, logs, and rate limits. A responder replies to the original `msg_id`, so it
+never even learns who asked. This structurally defeats source-spoofing.
 
 ### 4.2 ACL — per-context read/write/delete
-
-Each context carries an access list, e.g.:
-
-```
-agentA:rwd , agentB:r , *:r
-```
-
-The owner always has full access; others get exactly what the list grants. An unauthorized read
-returns `NOPERM`, not the data.
+Each context carries an access list, e.g. `agentA:rwd , agentB:r , *:r`. The owner always has full
+access; an unauthorized read returns `NOPERM`, not the data.
 
 ### 4.3 Capability lattice — the structural injection guard
+Content has an **origin** and a set of **capabilities** it may flow into:
 
-This is the part that makes TOAP feel like an OS. Content has an **origin** and a set of
-**capabilities** it is allowed to flow into:
-
-```
-Origin            Allowed capabilities
-──────            ────────────────────────────────────────────
-Internal          read, summarize, transform, classify, EXEC, EMAIL, PAY, DELETE   (trusted: all)
-External          read, summarize, transform, classify                              (no side effects)
-User              read, summarize, classify                                         (most restricted)
-```
-
-The broker maps each opcode to a capability (`Capability::for_op`) and refuses anything the
-content's provenance forbids:
-
-```
-User-originated content
-        │
-        ▼  attempts EXEC / PAY / DELETE
-   ┌────────────┐
-   │  REFUSED   │   ERR NOPERM reason=capability_denied
-   └────────────┘
+```mermaid
+flowchart TB
+    subgraph LAT ["Origin → allowed capabilities"]
+        direction TB
+        I["<b>Internal</b> (trusted)<br/>read · summarize · transform · classify · EXEC · EMAIL · PAY · DELETE"]
+        E["<b>External</b><br/>read · summarize · transform · classify <i>(no side effects)</i>"]
+        U["<b>User</b> (most restricted)<br/>read · summarize · classify"]
+    end
+    U -->|"attempts EXEC / PAY / DELETE"| BLK["REFUSED<br/>NOPERM reason=capability_denied"]
+    classDef int fill:#ebfbee,stroke:#2f9e44,color:#111;
+    classDef ext fill:#fff9db,stroke:#f08c00,color:#111;
+    classDef usr fill:#fff0f6,stroke:#c2255c,color:#111;
+    classDef blk fill:#fff5f5,stroke:#e03131,color:#111;
+    class I int
+    class E ext
+    class U usr
+    class BLK blk
 ```
 
-So if a malicious document literally says "delete the database," that *content* is structurally
-blocked from reaching a destructive operation — regardless of how cleverly it's phrased. This is
-CaMeL-style information-flow control, enforced at the protocol layer, and the taint **travels with
-the reference** across agent hops (containing prompt-injection propagation).
+The broker maps each opcode to a capability (`Capability::for_op`) and refuses anything the content's
+provenance forbids. So if a malicious document literally says "delete the database," that *content* is
+structurally blocked from reaching a destructive operation — and because the tag travels with the
+reference, taint is preserved across hops (containing prompt-injection propagation).
 
 ### 4.4 Rate limit & replay
+A per-agent token bucket (`ERR RATE`) and per-session duplicate-`msg_id` rejection (`ERR REPLAY`).
 
-- **Rate limit:** a per-agent token bucket; bursts beyond capacity get `ERR RATE`.
-- **Replay:** duplicate `msg_id`s within a session are rejected with `ERR REPLAY`.
-
-**Pros:** identity can't be spoofed; injection is contained *structurally* (not by fragile keyword
-bans); DoS and naive replay are handled.
-**Cons:** replay protection is **per-session only** — full cross-reconnect protection needs signed
-per-frame nonces (not yet built). There's no message **signing** yet, so a man-in-the-middle on the
-transport could tamper with payloads; production deployments need TLS/mTLS underneath. The capability
-lattice is coarse (three origins) — finer per-tool grants are future work.
+| Pros | Cons |
+|---|---|
+| Identity un-spoofable; injection contained *structurally*, not by keyword bans; DoS + naive replay handled | Replay is **per-session only** (no cross-reconnect nonces yet); no message **signing** yet (needs TLS/mTLS underneath); lattice is coarse (3 origins) |
 
 ---
 
@@ -269,144 +269,129 @@ lattice is coarse (three origins) — finer per-tool grants are future work.
 
 The broker is TOAP's brain. Every message flows through it.
 
-```
-                 ┌───────────┐
-                 │  Broker   │
-                 └─────┬─────┘
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-      ┌───────┐   ┌───────┐   ┌───────┐
-      │ Agt A │   │ Agt B │   │ Agt C │
-      └───────┘   └───────┘   └───────┘
-```
-
-Responsibilities:
-
-- **Routing** — deliver `REQ` to the target agent (`SEND → Agent B`).
-- **Correlation** — match a `RES`/`ERR` back to the requester by `msg_id` (concurrent-safe).
-- **Sessions** — one session record per connection (id, agent, caps, version).
-- **Fan-out** — a `PATCH` to a subscribed context emits an `EVT` to every subscriber.
-- **Replay protection** — rejects duplicate request ids in a session.
-
-```
-PATCH(CTX:42) ──▶ Broker ──┬──▶ EVT(CTX:42) ──▶ subscriber 1
-                           ├──▶ EVT(CTX:42) ──▶ subscriber 2
-                           └──▶ EVT(CTX:42) ──▶ subscriber 3
+```mermaid
+flowchart TB
+    BR(("Broker"))
+    BR --- A[Agent A]
+    BR --- B[Agent B]
+    BR --- C[Agent C]
+    BR --- S[(Context Store)]
+    classDef broker fill:#e6fcf5,stroke:#0ca678,color:#111;
+    classDef agent fill:#e7f5ff,stroke:#1971c2,color:#111;
+    classDef store fill:#f3f0ff,stroke:#7048e8,color:#111;
+    class BR broker
+    class A,B,C agent
+    class S store
 ```
 
-**Pros:** uniform enforcement point for identity/ACL/routing; subscriptions make collaborative
-state changes push-based instead of polling.
-**Cons:** the broker is a **single point of failure and a chokepoint** — this is an explicit
-threat-model assumption. High-availability (multiple brokers, shared store, failover) is not yet
-implemented. All traffic serializing through one broker is also a potential throughput ceiling.
+Responsibilities: **routing** (deliver `REQ` to the target), **correlation** (match `RES`/`ERR` to the
+requester by `msg_id`), **sessions** (one record per connection), **fan-out**, and **replay
+protection**. A `PATCH` to a subscribed context pushes an `EVT` to every subscriber:
+
+```mermaid
+flowchart LR
+    P["PATCH(CTX:42)"] --> BR(("Broker"))
+    BR -->|EVT CTX:42| S1[subscriber 1]
+    BR -->|EVT CTX:42| S2[subscriber 2]
+    BR -->|EVT CTX:42| S3[subscriber 3]
+    classDef broker fill:#e6fcf5,stroke:#0ca678,color:#111;
+    class BR broker
+```
+
+| Pros | Cons |
+|---|---|
+| Uniform enforcement point; subscriptions make state changes push-based | **Single point of failure & chokepoint** (explicit threat-model assumption); HA/failover not yet built; throughput ceiling |
 
 ---
 
 ## 8. Layer 6 — Shared Context Store
 
-The heart of TOAP. Content is stored once and addressed by a numeric ID.
+The heart of TOAP. Content is stored once and addressed by a numeric ID. Each entry carries far more
+than bytes:
 
+```mermaid
+flowchart LR
+    subgraph ENTRY ["Context entry — CTX:1"]
+        direction TB
+        DATA["content (e.g. 50k-token document)"]
+        META["owner · ACL · provenance · TTL<br/>version + delta log · subscribers"]
+    end
+    REF["a message carries only: CTX:1"] -.->|resolves to| ENTRY
+    classDef e fill:#f3f0ff,stroke:#7048e8,color:#111;
+    class DATA,META e
 ```
-┌──────────────────────────────────────────────┐
-│  CTX:1  →  Document (50k tokens)               │
-│  CTX:2  →  Analysis                            │
-│  CTX:3  →  Summary                             │
-└──────────────────────────────────────────────┘
 
-instead of sending 50k tokens, you send:  CTX:1
-```
+Instead of sending 50k tokens, you send `CTX:1`. The metadata is what makes a reference **lossless**
+(content recoverable), **secure** (provenance travels), and **collaborative** (versioned deltas +
+events). Code: `crates/toap-context`.
 
-Each entry (`crates/toap-context`) carries more than bytes:
-
-- **content**
-- **owner** (broker-derived)
-- **ACL** (read/write/delete)
-- **provenance** (origin + capability set — Section 4.3)
-- **TTL** + garbage collection (expired contexts are evicted)
-- **version** + an append-only **delta log** (field-level `PATCH` history)
-- **subscriptions** (who gets `EVT` on change)
-
-It also exposes the **materialization** primitive used in Section 9.
-
-**Pros:** dedup across the whole agent mesh (the thing provider prompt-caching can't do across
-agents/providers); metadata travels with content; deltas + versioning enable collaborative edits and
-time-travel-style inspection.
-**Cons:** the current backend is **in-memory and single-node** — it does not survive a broker
-restart and does not scale horizontally. Durable/distributed backends (Redis, mmap, etc.) are
-roadmap. A reference is only as available as the store; if the store loses an entry, holders of the
-ID must fall back to inline (handled by the spectrum in Section 9).
+| Pros | Cons |
+|---|---|
+| Dedup across the whole mesh (what provider prompt-caching can't do cross-agent/provider); metadata travels with content; deltas + versioning enable collaboration & inspection | Backend is **in-memory, single-node** — doesn't survive restart, doesn't scale horizontally (durable/distributed backends are roadmap) |
 
 ---
 
 ## 9. The Clever Part — Two-Plane Design
 
-Most protocols mix routing metadata and payload into one blob and optimize one number. TOAP notices
-that the two have **different readers with opposite cost functions**:
+Most protocols mix routing metadata and payload into one blob. TOAP notices the two have **different
+readers with opposite cost functions** and splits them:
 
+```mermaid
+flowchart TB
+    subgraph MSG ["One TOAP message"]
+        direction TB
+        CTL["<b>Control plane</b> (binary)<br/>id · session · ACL · capability · nonce<br/><i>optimize for BYTES</i>"]
+        SEM["<b>Semantic plane</b> (text)<br/>OP(args)?opts · the actual content<br/><i>optimize for TOKENS</i>"]
+    end
+    CTL --> BR["read by the BROKER"]
+    SEM --> LLM["read by the LLM"]
+    classDef ctl fill:#e7f5ff,stroke:#1971c2,color:#111;
+    classDef sem fill:#e6fcf5,stroke:#0ca678,color:#111;
+    classDef r fill:#f8f9fa,stroke:#868e96,color:#111;
+    class CTL ctl
+    class SEM sem
+    class BR,LLM r
 ```
-┌──────────────────────────────┐
-│  CONTROL PLANE  (binary)      │  read by the BROKER
-│  id · ACL · session · nonce · │  → optimize for BYTES
-│  taint                        │     (bandwidth, parse latency)
-├──────────────────────────────┤
-│  SEMANTIC PLANE  (text)       │  read by the LLM
-│  task · instructions · the    │  → optimize for TOKENS
-│  actual content               │     (model cost, only what it reads)
-└──────────────────────────────┘
-```
 
-- The **broker** mostly reads the control plane and never tokenizes the payload.
-- The **LLM** mostly reads the semantic plane and never sees the control header.
+The broker mostly reads the control plane and never tokenizes the payload; the LLM mostly reads the
+semantic plane and never sees the control header. Encoding each plane for its single reader means
+neither is dominated — which is why "bytes vs tokens" stops being a confusion.
 
-By encoding each plane for its single reader, neither is dominated. This is why "bytes vs tokens"
-stops being a confusion: they're literally different planes.
-
-**Pros:** clean separation of concerns; lets the control plane go binary/compact while the semantic
-plane stays tokenizer-friendly and human-readable.
-**Cons:** more moving parts than a single JSON blob; the benefit only fully materializes once V2
-binary framing is the default transport (today V1 text is the common path).
+| Pros | Cons |
+|---|---|
+| Clean separation; control plane can go compact/binary while semantic plane stays tokenizer-friendly | More moving parts than one JSON blob; full benefit needs V2 binary as the default transport (today V1 text is common) |
 
 ---
 
 ## 10. The Most Research-Worthy Idea — Reference Materialization Spectrum
 
 A reference is one *logical* thing with three *physical* materializations, chosen per call by a cost
-model:
+model, with **graceful fallback**:
 
+```mermaid
+flowchart TB
+    R["logical reference R(content)"]
+    R --> INL["<b>INLINE</b><br/>embed the text<br/><i>tokens now; tiny / one-shot</i>"]
+    R --> CTX["<b>CTX_REF</b><br/>send ID, fetch from store<br/><i>the dedup win</i>"]
+    R --> KV["<b>KV_BRIDGE</b><br/>reuse KV cache directly<br/><i>skip prefill; same-model only</i>"]
+    KV -->|"no runtime / different model / RoPE offset"| CTX
+    CTX -->|"store unavailable / tiny one-shot"| INL
+    classDef inl fill:#fff9db,stroke:#f08c00,color:#111;
+    classDef ctx fill:#ebfbee,stroke:#2f9e44,color:#111;
+    classDef kv fill:#e7f5ff,stroke:#1971c2,color:#111;
+    class INL inl
+    class CTX ctx
+    class KV kv
 ```
-        logical reference  R(content)
-        ┌───────────┬───────────────┬──────────────┐
-        ▼           ▼               ▼
-   ┌─────────┐ ┌──────────┐  ┌──────────────┐
-   │ INLINE  │ │ CTX_REF  │  │  KV_BRIDGE   │
-   │ embed   │ │ send ID, │  │ reuse KV     │
-   │ the text│ │ fetch it │  │ cache直接     │
-   └─────────┘ └──────────┘  └──────────────┘
-   tokens now   dedup win     skip prefill (same-model only)
-```
-
-- **INLINE** — embed the content as text. Best for tiny or single-use content (no store round-trip).
-- **CTX_REF** — send the ID; the receiver fetches from the store. The dedup win for reused content.
-- **KV_BRIDGE** — point at a reusable KV cache so the receiver skips prefill entirely. Only valid
-  when sender and receiver share the *same model and tokenizer*.
 
 The cost model weighs content length, reference frequency, link bandwidth, GPU load, and the
-same-model constraint. Crucially, it **degrades gracefully** when constraints fail:
+same-model constraint. The same decision — *materialize now vs reference vs reuse computation* —
+spans the **token plane** (resend vs ID) and the **tensor plane** (re-prefill vs load KV). Treating
+them as one policy is the architecture's most novel point.
 
-```
-KV_BRIDGE  ──(no model runtime / different model / RoPE offset)──▶  CTX_REF
-CTX_REF    ──(store unavailable / content tiny & one-shot)──────▶  INLINE
-```
-
-**Pros:** one decision spans the *token plane* (resend vs ID) and the *tensor plane* (re-prefill vs
-load KV) — nobody else treats those as the same choice; the fallback chain means a reference is
-never a hard dependency.
-**Cons:** **KV_BRIDGE's actual tensor transport is not implemented** — only the policy and the
-`KvTransport` trait exist; with no model runtime it always falls back to CTX_REF (which is the tested
-default). KV reuse is also genuinely hard (RoPE position offsets, cross-context attention loss,
-judge-vs-executor perturbation), and a KV cache is far larger than the text, so it often loses to
-"re-send text + provider prefix cache." TOAP treats it as an optional, constraint-guarded mode for
-exactly these reasons.
+| Pros | Cons |
+|---|---|
+| One decision across token + tensor planes; fallback chain means a reference is never a hard dependency | **KV_BRIDGE tensor transport is not implemented** — only the `KvTransport` trait/policy exists; KV reuse is genuinely hard (RoPE offsets, attention loss) and a KV cache is far larger than the text, so it often loses to "re-send text + prefix cache" |
 
 ---
 
@@ -414,63 +399,59 @@ exactly these reasons.
 
 Task: *summarize a document, then act on the summary.*
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as Orchestrator
+    participant Br as Broker (security + routing)
+    participant St as Context Store
+    participant W as Worker agent
+    O->>Br: STORE(doc)
+    Br->>St: put → CTX:1
+    O->>Br: REQ SUM(CTX:1)?max_words=150
+    Note over Br: check identity · ACL · capability · rate · replay<br/>(doc is User-origin → SUM allowed; EXEC would be refused)
+    Br->>W: deliver CTX:1
+    Note over W: materialize CTX:1 (INLINE / CTX_REF / KV), read, summarize
+    W->>Br: OK(CTX:2)
+    Br->>St: put → CTX:2
+    O->>Br: REQ ACT(CTX:2)
+    Note over O,Br: downstream agent gets CTX:2 — NOT the whole transcript
 ```
-Step 1   Agent stores the doc once
-         STORE(doc) ─────────────▶ CTX:1
-
-Step 2   Agent asks a worker to summarize, by reference
-         REQ SUM(CTX:1)?max_words=150
-
-Step 3   Broker checks identity · ACL · capability · rate · replay
-         (doc is User-origin → SUM is allowed; EXEC would be refused)
-
-Step 4   Target agent receives CTX:1, materializes it (INLINE/CTX_REF/KV)
-         reads the content, summarizes
-
-Step 5   Worker stores its output
-         OK(CTX:2)
-
-Step 6   The next agent receives CTX:2 — NOT the whole transcript
-         REQ ACT(CTX:2)
-```
-
-The point of Step 6: downstream agents get exactly the distilled context they need by reference,
-instead of an ever-growing transcript.
 
 ---
 
 ## 12. Architecture in One Diagram
 
-```
-              ┌─────────────────────────────┐
-              │           Agents            │   LLMs · tools · rule-based
-              └──────────────┬──────────────┘
-                             │  (never talk directly)
-              ┌──────────────▼──────────────┐
-              │         TOAP Client         │   async SDK
-              └──────────────┬──────────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │       Protocol Layer        │   V1 text · V2 binary
-              └──────────────┬──────────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │   Security: ACL · capability │   identity · taint · rate · replay
-              └──────────────┬──────────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │       Broker / Router       │   sessions · routing · fan-out
-              └───────┬──────────────┬───────┘
-                      │              │
-            ┌─────────▼───┐   ┌──────▼──────┐
-            │ Context     │   │   Agents    │
-            │ Store       │   │ (targets)   │
-            │ CTX:N→data  │   └─────────────┘
-            └─────────────┘
-                      │
-              ┌───────▼──────────────────────┐
-              │   Transport: TCP (→ WS/gRPC)  │
-              └───────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph CLIENTS [Agents]
+        A[Agent A]
+        B[Agent B]
+        C[Agent C]
+    end
+    A --> SEC
+    B --> SEC
+    C --> SEC
+    subgraph BROKER [Broker]
+        direction TB
+        SEC["Security filter<br/>identity · ACL · capability · rate · replay"]
+        RT["Router<br/>sessions · routing · msg_id correlation · fan-out"]
+        SEC --> RT
+    end
+    RT --> STORE
+    RT --> TR
+    subgraph DATA [State and transport]
+        STORE["Shared context store<br/>CTX:N → content + ACL + provenance + TTL + deltas"]
+        TR["Transport<br/>length-prefixed TCP (→ WebSocket / gRPC)"]
+    end
+    classDef agent fill:#e7f5ff,stroke:#1971c2,color:#111;
+    classDef sec fill:#fff4e6,stroke:#e8590c,color:#111;
+    classDef route fill:#e6fcf5,stroke:#0ca678,color:#111;
+    classDef store fill:#f3f0ff,stroke:#7048e8,color:#111;
+    class A,B,C agent
+    class SEC sec
+    class RT route
+    class STORE,TR store
 ```
 
 ---
@@ -478,19 +459,15 @@ instead of an ever-growing transcript.
 ## 13. Honest Pros and Cons — the Whole System
 
 ### Where TOAP genuinely wins
-
-- **Lossless references** beat lossy summaries when a later step needs a detail an upfront summary
-  would have dropped.
+- **Lossless references** beat lossy summaries when a later step needs a detail a summary dropped.
 - **Security travels with data** — broker-derived identity + capability lattice contain spoofing and
-  prompt-injection propagation structurally, which a prompt template cannot.
-- **Cross-agent / cross-provider dedup** — provider prompt caching only helps a stable prefix within
-  one provider/session; TOAP dedups across the whole mesh.
+  injection propagation structurally, which a prompt template cannot.
+- **Cross-agent / cross-provider dedup** — provider caching only helps a stable prefix within one
+  provider/session; TOAP dedups across the whole mesh.
 - **Systematized multi-agent state** — versioning, deltas, subscriptions, TTL, ACL in one place.
 
 ### Where TOAP does not win (and the paper says so)
-
 - **Raw tokens:** a competent summarizing orchestrator is *more* token-efficient (~2.5× vs ~1.9×).
-  If you only care about token count and accept lossiness, summarize.
 - **Symbolic opcodes:** terse syntax saves ~50% of *bytes* but only 0–17% of *tokens* (BPE taxes
   punctuation). The win is content referencing, not opcode terseness.
 - **Single agent reading one doc once:** referencing saves nothing — the agent still reads the doc.
@@ -507,27 +484,25 @@ instead of an ever-growing transcript.
 | Client SDKs | Rust only today |
 
 ### Evidence honesty
-
 The benchmark is a real but **single-vendor, small-n pilot** (Claude Haiku/Sonnet/Opus, n=33,
-deterministic bias-free scoring). It is enough to establish direction and to *disprove* the naive
-"references save the most tokens" claim; it is **not** enough for a general efficiency claim. See
-`docs/claims.md` and the paper's limitations section.
+deterministic bias-free scoring). It establishes direction and *disproves* the naive "references save
+the most tokens" claim; it is **not** a general efficiency claim. See `docs/claims.md` and the paper.
 
 ---
 
 ## 14. The One-Paragraph Takeaway
 
 TOAP is best understood as an **operating-system-style messaging layer for LLM agents**, not another
-agent framework and not a token-compression gimmick. Its three ideas that are actually worth
-attention are the **two-plane architecture** (separate byte and token planes for separate readers),
-the **reference materialization spectrum** (INLINE → CTX_REF → KV_BRIDGE with graceful fallback,
-spanning the token and tensor planes), and **capability-lattice security attached to context**
-(provenance and allowed-operations travel with every reference). "CTX references" themselves are old
-(blackboard systems, the 1980s); the contribution is the combination, the honest measurement, and a
-working, tested implementation.
+agent framework and not a token-compression gimmick. Its three ideas worth attention are the
+**two-plane architecture** (separate byte and token planes for separate readers), the **reference
+materialization spectrum** (INLINE → CTX_REF → KV_BRIDGE with graceful fallback, spanning the token
+and tensor planes), and **capability-lattice security attached to context** (provenance and
+allowed-operations travel with every reference). "CTX references" themselves are old (blackboard
+systems, the 1980s); the contribution is the combination, the honest measurement, and a working,
+tested implementation.
 
 ---
 
-*See also: [`paper/main.pdf`](../paper/main.pdf) (full method + results), [`docs/protocol_v1.md`](protocol_v1.md)
-(exact wire contract), [`docs/security_model.md`](security_model.md), [`docs/decisions.md`](decisions.md),
-and [`docs/claims.md`](claims.md) (the measured-claims ledger).*
+*See also: [`paper/main.pdf`](../paper/main.pdf) · [`docs/protocol_v1.md`](protocol_v1.md) ·
+[`docs/security_model.md`](security_model.md) · [`docs/decisions.md`](decisions.md) ·
+[`docs/claims.md`](claims.md).*

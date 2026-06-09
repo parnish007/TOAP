@@ -22,7 +22,7 @@
 \textbf{\large A Reference-Minimized, Two-Plane Architecture for Inter-Agent Messaging,}\\
 \textbf{\large with an Honest Token Accounting and a Multi-Model Pilot}}
 \author{Trilochan Sharma \\ Independent Researcher \\ \texttt{parnishklpo@gmail.com}}
-\date{May 2026}
+\date{June 2026}
 
 \begin{document}
 \sloppy
@@ -133,10 +133,62 @@ prefill compute --- and measure each independently.
 
 \section{TOAP Architecture}\label{sec:arch}
 \subsection{System overview}
-TOAP is layered and broker-mediated (Figure~\ref{fig:arch}): agents use a thin client API; a protocol
-layer encodes/validates; a security filter enforces identity, ACL, taint, rate limits; a router
-delivers by target and correlates responses by \texttt{msg\_id}; a shared store holds content once; a
-transport frames messages.
+TOAP is a layered, broker-mediated protocol (Figure~\ref{fig:arch}). A message travels \emph{down} the
+stack on the way out and \emph{up} the stack on the way in; each layer has a single, narrow
+responsibility. The defining structural choice is that \textbf{agents never communicate directly} ---
+every message is mediated by a broker that owns identity, access control, and routing. This is what
+makes source identity un-spoofable and lets security be enforced in exactly one place.
+
+We describe each layer in turn (\S\ref{sec:arch:agents}--\S\ref{sec:arch:transport}), then the two
+cross-cutting ideas that distinguish TOAP: the two-plane wire format (\S\ref{sec:twoplane}) and the
+reference materialization spectrum (\S\ref{sec:refspec}).
+
+\subsubsection{Agents and the client SDK}\label{sec:arch:agents}
+Agents (LLMs, tools, or rule-based workers) hold no protocol state of their own; they use a thin async
+client SDK that performs the SYN/ACK handshake binding identity to the connection, correlates each
+reply to its request by \texttt{msg\_id} (so concurrent in-flight requests cannot be confused), and
+delivers inbound \emph{events} on a channel separate from inbound \emph{requests}. The agent surface is
+deliberately small: \texttt{set\_context}, \texttt{get\_context}, \texttt{send\_request},
+\texttt{patch}, \texttt{subscribe}.
+
+\subsubsection{Protocol layer}\label{sec:arch:protocol}
+The protocol layer turns a message into bytes and back, validating grammar on the way in. V1 is a
+text frame \texttt{TYPE|MSG\_ID|TARGET|PAYLOAD} with a function-style payload
+\texttt{OP(args)?k=v\&...}; the function form is used precisely because the earlier colon form
+(\texttt{SUM:CTX:42}) is ambiguous when an argument (\texttt{CTX:42}) itself contains a colon. The
+parser is \emph{strict about protocol structure} (delimiter count, payload grammar, context-reference
+validity) but \emph{never rejects ordinary content} for resembling an attack --- SQL, HTML, code, and
+even ``ignore previous instructions'' are valid data. V2 adds a compact binary control header
+(\S\ref{sec:twoplane}) that round-trips the identical message model.
+
+\subsubsection{Security filter}\label{sec:arch:security}
+Before routing, every inbound message passes four checks, in order: (i) \emph{identity} --- derived
+from the authenticated session, never read from the wire; (ii) \emph{ACL} --- per-context
+read/write/delete; (iii) \emph{capability} --- does this content's provenance permit this operation
+(\S\ref{sec:arch:security:cap}); and (iv) \emph{rate/replay} --- a per-agent token bucket and
+per-session duplicate-\texttt{msg\_id} rejection. A failure at any stage short-circuits to a typed
+error (\texttt{NOPERM}/\texttt{RATE}/\texttt{REPLAY}) and the message is never routed.
+
+\subsubsection{Broker / router}\label{sec:arch:broker}
+The broker binds one \texttt{agent\_id} per connection at SYN, routes \texttt{REQ} to the target agent,
+and correlates the returning \texttt{RES}/\texttt{ERR} to the original requester by \texttt{msg\_id}
+--- so a responder addresses its reply to an id, never to a (spoofable) identity, and never learns who
+asked. A \texttt{PATCH} (\texttt{DLT}) to a subscribed context fans out an \texttt{EVT} to every
+subscriber. The broker is, by design, the sole chokepoint; we treat its availability as an explicit
+threat-model assumption (\S\ref{sec:disc}).
+
+\subsubsection{Shared context store}\label{sec:arch:store}
+Content is stored once under a numeric id and addressed as \texttt{CTX:N}. Each entry carries not just
+bytes but the metadata that makes a reference safe and useful: broker-derived owner, ACL, capability
+provenance, TTL (with lazy and swept garbage collection), a monotonic version with an append-only
+field-level delta log, and a subscriber set. This is what lets a reference be \emph{lossless} (the
+content is recoverable), \emph{secure} (provenance travels with it), and \emph{collaborative}
+(versioned deltas + events). The current backend is in-memory and single-node; durable/distributed
+backends are future work.
+
+\subsubsection{Transport}\label{sec:arch:transport}
+The lowest layer frames messages as length-prefixed records over TCP (Tokio). WebSocket and gRPC
+transports are planned; nothing above the transport layer depends on the choice.
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}[font=\small, node distance=3mm,
@@ -154,14 +206,40 @@ transport frames messages.
 \label{fig:arch}
 \end{figure}
 
-\subsection{Two-plane wire format and reference materialization}
-The byte and token planes have opposite cost functions and different readers, so TOAP separates a
-compact \emph{control plane} (ids, session, ACL, taint, nonce; read by the broker; optimized for bytes)
-from a tokenizer-aligned \emph{semantic plane} (read by the LLM; optimized for tokens). ``Send text,''
-``send a context ID,'' and ``send a KV pointer'' are three \emph{materializations of one reference},
-chosen by a cost model with graceful degradation. Figure~\ref{fig:flow} shows the token-flow contrast
-that the experiment measures; the store enables send-once/refer-many, which is where multi-hop dedup
-compounds.
+\subsection{Two-plane wire format}\label{sec:twoplane}
+A single message is read by two parties with opposite cost functions. The \emph{broker} needs ids,
+session, ACL, capability tags, and nonces --- metadata whose cost is \emph{bytes} (bandwidth, parse
+latency, framing) and which the LLM should never see. The \emph{LLM} needs the operation and its
+content --- text whose cost is \emph{tokens} and which the broker should never tokenize. TOAP encodes
+these as two planes: a compact binary \emph{control plane} optimized for bytes, and a
+tokenizer-aligned \emph{semantic plane} optimized for tokens. Because each plane is encoded for its
+single reader, neither is dominated --- which is precisely why ``bytes vs.\ tokens'' (\S\ref{sec:bytes})
+stops being a confusion: they are different planes with different objectives.
+
+\subsection{Capability-lattice provenance}\label{sec:arch:security:cap}
+A boolean ``tainted'' flag cannot express \emph{what} untrusted content may do. TOAP attaches a
+provenance to each context: an \texttt{Origin} (\textsc{Internal}/\textsc{External}/\textsc{User}) and
+the set of \texttt{Capability} values that origin permits (read, summarize, transform, classify,
+execute, email, pay, delete). Trusted internal content permits all; external content permits read-only
+flows (read/summarize/transform/classify) but no side effects; user-originated content is most
+restricted. The broker maps each opcode to a capability (\texttt{Capability::for\_op}) and refuses any
+operation the provenance forbids --- e.g.\ an \texttt{EXEC}/\texttt{PAY}/\texttt{DELETE} driven by
+user-origin content returns \texttt{NOPERM reason=capability\_denied}. Because the tag travels with the
+reference, taint is preserved across agent-to-agent hops, structurally containing prompt-injection
+propagation rather than relying on fragile content pattern-matching.
+
+\subsection{Reference materialization spectrum}\label{sec:refspec}
+``Send the text,'' ``send a context id,'' and ``send a KV-cache pointer'' are not three features but
+three \emph{materializations of one logical reference}, chosen per call by a cost model and degrading
+gracefully when constraints fail: \textsc{KV\_Bridge}~$\rightarrow$~\textsc{Ctx\_Ref}~$\rightarrow$
+\textsc{Inline}. \textsc{Inline} embeds the bytes (best for tiny/one-shot content); \textsc{Ctx\_Ref}
+sends the id and the receiver fetches from the store (the dedup win for reused content); \textsc{KV\_Bridge}
+points at a reusable KV cache so the receiver skips prefill (valid only for the same model and
+tokenizer). The same decision --- materialize now vs.\ reference vs.\ reuse computation --- spans both
+the token plane (resend text vs.\ send id) and the tensor plane (re-prefill vs.\ load KV); treating
+them as one policy is the architecture's most novel point. Figure~\ref{fig:flow} shows the token-flow
+contrast the experiment measures: naive prompts grow with pipeline depth while references stay flat,
+because the store holds content once and only ids travel.
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}[font=\footnotesize, node distance=5mm,
@@ -312,7 +390,7 @@ downstream reductions. Separately, TOAP coordination frames are $\sim$17$\times$
 JSON-RPC equivalents (model-independent, exactly reproducible). These are the regimes where a reference
 protocol, rather than per-hop summarization, is the natural fit --- and where losslessness matters most.
 
-\section{Discussion and Limitations}
+\section{Discussion and Limitations}\label{sec:disc}
 The honest synthesis: \emph{naive transcript accumulation is wasteful; both summarization and
 referencing fix it at equal accuracy here; summarization is cheaper on tokens but lossy; referencing is
 slightly costlier but lossless, secure, and systematic} (\S\ref{sec:why}). The retracted Haiku
