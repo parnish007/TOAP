@@ -1,0 +1,371 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\definecolor{tgreen}{HTML}{2F6F4F}
+\definecolor{tred}{HTML}{B0413E}
+\definecolor{tgray}{HTML}{EEF1F0}
+\definecolor{tblue}{HTML}{2B5D8A}
+\definecolor{tbox}{HTML}{FFF6E0}
+
+\newcommand{\callout}[1]{\par\vspace{2mm}\noindent\fcolorbox{black!30}{tbox}{%
+\begin{minipage}{0.97\linewidth}\small #1\end{minipage}}\vspace{2mm}\par}
+
+\title{\textbf{TOAP: The Token-Optimized Agent Protocol}\\[1mm]
+\textbf{\large A Reference-Minimized, Two-Plane Architecture for Inter-Agent Messaging,}\\
+\textbf{\large with an Honest Token Accounting and a Multi-Model Pilot}}
+\author{Trilochan Sharma \\ Independent Researcher \\ \texttt{parnishklpo@gmail.com}}
+\date{May 2026}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\begin{center}\small
+Code and data: \url{https://github.com/parnish007/TOAP} \quad|\quad
+Code: MIT \quad|\quad Paper: CC\,BY\,4.0
+\end{center}
+
+\begin{abstract}
+Multi-agent LLM pipelines commonly forward a growing transcript --- the source document plus every
+prior agent's output --- into each downstream prompt, so token cost grows with depth. A natural remedy
+is to pass a \emph{reference} to shared content instead of re-sending it. We report a \textbf{preliminary
+pilot} that measures this remedy honestly rather than advocating it. Three findings stand out.
+\textbf{(1)} In a controlled experiment ($n{=}33$ real Claude generations across Haiku/Sonnet/Opus,
+three context strategies, accuracy scored by a \emph{deterministic, model-independent} rubric checker),
+reference-minimization (TOAP) and a competent summarizing orchestrator \emph{both} cut downstream
+tokens at \textbf{full accuracy parity (all 33 samples 4/4)}. \textbf{(2)} Crucially, the
+\emph{summarizing baseline saves more tokens than TOAP} ($\sim$2.5$\times$ vs.\ $\sim$1.9$\times$ vs.\
+the naive baseline): reference-minimization is \emph{not} a token win over good engineering. TOAP's
+actual value is therefore \emph{losslessness} (a reference can be re-expanded; a summary cannot),
+\emph{security} (provenance/identity travel with the reference), and \emph{systematization} at the
+protocol layer. \textbf{(3)} A single-sample accuracy regression we initially observed on Haiku
+\textbf{did not reproduce} at $n{=}5$ and is retracted --- a concrete illustration of why $n{=}1$
+agent measurements are unsafe. We also separate wire bytes from model tokens and show symbolic
+``opcodes'' save 50\% of bytes but only 0--17\% of tokens. We describe the protocol architecture (a
+two-plane wire format; a reference-materialization spectrum) and a Rust reference implementation, and
+are explicit throughout about what is \emph{implemented} vs.\ \emph{proposed}. \emph{Threats to
+validity are first-class}: a single model family/tokenizer, a same-family judge as a secondary check
+only, and small $n$. The mechanism is not novel (blackboard systems, A2A artifacts, ADOL); the
+contribution is the honest, reproducible accounting.
+\end{abstract}
+
+\section{Introduction}
+In agent pipelines and fan-out workflows, an orchestrator typically forwards a growing transcript into
+each subsequent agent's prompt. Because LLM cost is paid per prompt token, redundant re-transmission
+dominates coordination cost. TOAP stores shared content once under an identifier and exchanges
+references, so each agent retrieves only what it needs.
+
+We are deliberately conservative. The mechanism is old (\S\ref{sec:related}); ``$10\times$'' claims
+that count bytes mislead (\S\ref{sec:bytes}); and the question worth answering is not \emph{whether}
+referencing saves tokens but \emph{how it compares to a competently engineered baseline}, and whether
+small models pay an accuracy price. Our central, somewhat humbling, empirical result is that a good
+summarizing orchestrator saves \emph{more} tokens than reference-minimization, at equal accuracy ---
+so TOAP must justify itself on losslessness, security, and systematization, not on raw token savings.
+
+\callout{\textbf{What is measured vs.\ proposed.} The empirical results (\S\ref{sec:bytes},
+\S\ref{sec:results}) use the implemented V1 text protocol and real model generations. The
+architecture (\S\ref{sec:arch}) describes the full design; \textbf{\S\ref{sec:arch:status} states
+precisely which parts are implemented today and which are design proposals not yet evaluated}
+(notably the V2 binary plane and the KV-bridge materialization).}
+
+\noindent\textbf{Contributions (all framed as a preliminary pilot).}
+\begin{enumerate}\itemsep1pt
+  \item A two-plane protocol architecture and a reference-materialization spectrum (\S\ref{sec:arch}),
+        with a Rust reference implementation (\S\ref{sec:impl}).
+  \item An honest token accounting separating bytes, tokens, and compute, showing symbolic opcodes are
+        a minor lever (\S\ref{sec:bytes}).
+  \item A controlled, $n{=}33$, bias-free-scored comparison of naive / summarizing / reference
+        strategies, with a retracted single-sample regression (\S\ref{sec:results}).
+  \item A direct answer to ``why a protocol rather than a better orchestrator?'' (\S\ref{sec:why}).
+\end{enumerate}
+
+\section{Background and Related Work}\label{sec:related}
+\textbf{Shared-store coordination.} Agents coordinating through a common store rather than passing full
+messages is the \emph{blackboard} model (Hearsay-II~\cite{erman1980}); database normalization and
+pointers are the same principle. TOAP's context store is a modern restatement, and we claim no novelty
+for it. \textbf{Agent protocols.} MCP~\cite{mcp} (agent--tool) and A2A~\cite{a2a} (agent--agent) are
+the dominant standards; A2A already references shared content by ID via \emph{artifacts}. Token bloat
+is recognized: the ADOL Internet-Draft~\cite{adol} and MCP SEP-1576 target token-efficient messaging
+(Table~\ref{tab:landscape}). \textbf{Caching.} Provider prompt caching~\cite{promptcache} realizes
+``send once, reference implicitly'' within one provider/session; cross-agent referencing is
+complementary. \textbf{Symbolic comms}~\cite{talkhier,codeagents} cut tokens but risk comprehension;
+we measure the opcode component at $\le$17\%. \textbf{Security.} Provenance tracking follows CaMeL~\cite{camel}.
+\textbf{KV reuse}~\cite{kvcomm} is crowded and is treated as an optional, constraint-guarded mode.
+
+\begin{table}[h]\centering\footnotesize
+\begin{tabular}{llll}
+\toprule
+Protocol & Layer & Wire format & Token efficiency a goal? \\
+\midrule
+MCP (Anthropic) & agent--tool & JSON-RPC 2.0 / HTTP & No \\
+A2A (Google/LF) & agent--agent & JSON-RPC/HTTP (+gRPC/REST) & No \\
+ADOL (IETF draft) & layer above MCP/A2A & JSON \texttt{\$ref} dedup & Yes (content selection) \\
+\textbf{TOAP (this work)} & agent--agent & two-plane text/binary & Yes (encoding, token-aware) \\
+\bottomrule
+\end{tabular}
+\caption{Inter-agent protocol landscape (2026). TOAP is adjacent to ADOL/SEP-1576, not ahead of them.}
+\label{tab:landscape}
+\end{table}
+
+\section{Bytes Are Not Tokens}\label{sec:bytes}
+A common error is to minimize \emph{bytes} and report it as token savings. BPE tokenizers pre-tokenize
+on punctuation before merging, so dense punctuation each costs a whole token. Measured with
+\texttt{tiktoken} (cl100k): \texttt{SUM(CTX:42)?max\_words=150} is 25 bytes / 10 tokens vs.\ the NL
+``Please summarize document 42 in at most 150 words.'' at 50 bytes / 12 tokens --- 50\% fewer bytes but
+only 17\% fewer tokens (Figure~\ref{fig:bytes}); richer payloads save \emph{less}. The design
+consequence: \textbf{opcode terseness is a minor lever}; the real question is whether to transmit the
+\emph{content} at all. We therefore separate three cost planes --- wire bytes, model-input tokens,
+prefill compute --- and measure each independently.
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.62\textwidth]{figures/fig_bytes_tokens.png}
+\caption{Byte savings overstate token savings for symbolic opcodes (tiktoken cl100k).}
+\label{fig:bytes}
+\end{figure}
+
+\section{TOAP Architecture}\label{sec:arch}
+\subsection{System overview}
+TOAP is layered and broker-mediated (Figure~\ref{fig:arch}): agents use a thin client API; a protocol
+layer encodes/validates; a security filter enforces identity, ACL, taint, rate limits; a router
+delivers by target and correlates responses by \texttt{msg\_id}; a shared store holds content once; a
+transport frames messages.
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\small, node distance=3mm,
+  layer/.style={draw, rounded corners, minimum width=12cm, minimum height=0.85cm, align=center},
+  arr/.style={-{Stealth[length=2mm]}, thick}]
+\node[layer, fill=tgray] (ag) {\textbf{Agent layer} --- LLM \& rule-based agents via the TOAP client API};
+\node[layer, fill=tgreen!18, below=of ag] (pr) {\textbf{Protocol layer} --- V1 text codec + V2 binary control-plane codec, schema validator, tokenizer-aligned encoder};
+\node[layer, fill=tred!15, below=of pr] (se) {\textbf{Security filter} --- broker-derived identity, per-context ACL, taint policy, rate limit, replay guard};
+\node[layer, fill=tblue!12, below=of se] (br) {\textbf{Broker / router} --- sessions, target routing, \texttt{msg\_id} correlation, EVT fan-out};
+\node[layer, fill=tgray, below=of br] (cs) {\textbf{Shared context store} --- content once, owner/ACL/taint/TTL, field deltas + subscriptions};
+\node[layer, fill=tgreen!10, below=of cs] (tr) {\textbf{Transport} --- length-prefixed TCP (V1) $\rightarrow$ WebSocket/gRPC \emph{(proposed)}};
+\draw[arr] (ag)--(pr); \draw[arr] (pr)--(se); \draw[arr] (se)--(br); \draw[arr] (br)--(cs); \draw[arr] (cs)--(tr);
+\end{tikzpicture}
+\caption{TOAP layered architecture. Identity/trust are broker-owned, never claimed on the wire.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Two-plane wire format and reference materialization}
+The byte and token planes have opposite cost functions and different readers, so TOAP separates a
+compact \emph{control plane} (ids, session, ACL, taint, nonce; read by the broker; optimized for bytes)
+from a tokenizer-aligned \emph{semantic plane} (read by the LLM; optimized for tokens). ``Send text,''
+``send a context ID,'' and ``send a KV pointer'' are three \emph{materializations of one reference},
+chosen by a cost model with graceful degradation. Figure~\ref{fig:flow} shows the token-flow contrast
+that the experiment measures; the store enables send-once/refer-many, which is where multi-hop dedup
+compounds.
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=5mm,
+  ag/.style={draw, rounded corners, fill=tgray, minimum width=1.5cm, minimum height=0.7cm},
+  doc/.style={draw, fill=tred!15, minimum width=1.4cm, minimum height=0.5cm},
+  ref/.style={draw, fill=tgreen!18, minimum width=1.0cm, minimum height=0.5cm}]
+% naive row
+\node[ag] (a1) {Agent1}; \node[ag, right=14mm of a1] (a2) {Agent2}; \node[ag, right=14mm of a2] (a3) {Agent3};
+\node[above=1mm of a1, font=\bfseries] {Naive (transcript accumulation)};
+\node[doc, below=1mm of a1] (d1) {doc}; \node[doc, below=1mm of a2] (d2) {doc+out1}; \node[doc, below=1mm of a3] (d3) {doc+out1+out2};
+\draw[-{Stealth[length=1.5mm]}] (a1)--(a2); \draw[-{Stealth[length=1.5mm]}] (a2)--(a3);
+% toap row
+\node[ag, below=16mm of a1] (b1) {Agent1}; \node[ag, right=14mm of b1] (b2) {Agent2}; \node[ag, right=14mm of b2] (b3) {Agent3};
+\node[above=1mm of b1, font=\bfseries] {TOAP (reference)};
+\node[ref, below=1mm of b1] (r1) {CTX:1}; \node[ref, below=1mm of b2] (r2) {CTX:2}; \node[ref, below=1mm of b3] (r3) {CTX:3};
+\draw[-{Stealth[length=1.5mm]}] (b1)--(b2); \draw[-{Stealth[length=1.5mm]}] (b2)--(b3);
+\node[draw, dashed, right=8mm of b3, text width=2.7cm] {store holds content once; only IDs travel};
+\end{tikzpicture}
+\caption{Token-flow contrast: naive prompts grow with depth; references stay flat.}
+\label{fig:flow}
+\end{figure}
+
+\subsection{Implemented vs.\ proposed}\label{sec:arch:status}
+\callout{\textbf{Implemented today} (28 passing unit + integration tests): the V1 text protocol and
+parser; the \textbf{V2 binary control plane} (compact binary control header + text semantic payload ---
+the two-plane design, with round-trip tests); the shared context store with per-context ACL, TTL,
+field-level deltas, and subscriptions; a \textbf{capability-lattice} provenance model (Origin $\in$
+\{Internal, External, User\}, each with an allowed-capability set) the broker enforces structurally
+(user-/external-origin content cannot flow into EXEC/PAY/DELETE); an \textbf{in-band cache coordinate}
+with a stable-prefix~$\|$~volatile-suffix layout helper; the \textbf{materialization policy with
+graceful fallback} (KV\_BRIDGE~$\rightarrow$~CTX\_REF~$\rightarrow$~INLINE) behind a \texttt{KvTransport}
+trait; broker-derived identity, token-bucket rate limiting, per-session replay rejection,
+\texttt{msg\_id} correlation; and an MCP frontend.\\[1mm]
+\textbf{Still requires a model runtime} (interface implemented, tensor transfer not): the KV-cache
+\emph{transport} behind \texttt{KvTransport} --- with no runtime the policy correctly degrades to
+CTX\_REF (the tested default). Cross-vendor evaluation also remains future work.}
+
+\section{Implementation}\label{sec:impl}
+TOAP is a Rust workspace. \texttt{toap-core} defines the message model, a strict recursive-descent
+parser, and the encoder; it deliberately rejects malformed \emph{protocol} syntax but never rejects
+ordinary content for ``looking dangerous'' (SQL/HTML/prompt-like text are data). \texttt{toap-context}
+implements the in-memory store: numeric context IDs, an ACL grammar (\texttt{agent:rwd}), a
+\emph{capability-lattice} provenance model (\texttt{Origin} $\times$ allowed \texttt{Capability} set,
+with \texttt{Capability::for\_op} mapping opcodes to capabilities), TTL with lazy + sweep GC, a bounded
+per-context delta log, the \texttt{Reference} materialization enum with a
+\texttt{materialize\_with\_fallback} policy behind a \texttt{KvTransport} trait, and a
+\texttt{cache\_layout} helper for stable-prefix ordering. \texttt{toap-core} also provides a V2 binary
+control-plane codec (\texttt{encode\_v2}/\texttt{decode\_v2}) that round-trips the V1 message model.
+\texttt{toap-security} provides a token-bucket rate limiter and a per-session replay guard; the broker
+enforces the capability lattice structurally, refusing e.g.\ an
+\texttt{EXEC}/\texttt{PAY}/\texttt{DELETE} against user- or external-origin context. \texttt{toap-broker} is an asynchronous (Tokio) TCP server with length-prefixed
+framing; identity is bound to the connection at SYN, and a responder addresses replies by the original
+\texttt{msg\_id} so it never learns the requester (preventing source spoofing). \texttt{toap-client}
+is an async SDK; \texttt{toap-mcp} is the MCP frontend.
+
+Testing is unit \emph{and} integration: parser round-trip/validation and store/ACL/TTL/delta unit
+tests, plus end-to-end integration tests in which \textbf{real client processes connect to the broker
+over TCP} and exchange requests --- the broker performs actual routing and store operations (not
+mocked). Security integration tests assert that an unauthorized read is denied, a restricted op on
+tainted context is refused, and a subscriber receives a delta event. A live multi-process demo
+(broker + summarizer + classifier + orchestrator) exercises fan-out and merge. Coordination-frame
+sizes reported below are measured on the actual encoder output.
+
+\section{Why a Protocol, Not Just a Better Orchestrator?}\label{sec:why}
+The sharpest objection is: ``just write an orchestrator that summarizes before forwarding.'' Our
+experiment confirms a summarizing orchestrator is in fact \emph{more} token-efficient than referencing
+(\S\ref{sec:results}). So the case for a protocol does not rest on token savings. It rests on three
+properties a prompt-engineering pattern does not provide: \textbf{(i) Losslessness} --- a reference can
+be re-expanded to the full content on demand; a summary discards information irreversibly, which is
+safe only until a downstream task needs a dropped detail. \textbf{(ii) Security travels with the
+reference} --- provenance/taint and broker-derived identity are enforced structurally, so a compromised
+agent cannot launder untrusted content or spoof a source; a summarizing prompt template offers none of
+this. \textbf{(iii) Systematization} --- the behavior is uniform across heterogeneous agents and
+languages and composes with deduplication (send-once/refer-many) and provider caching, rather than
+being re-implemented per application. TOAP should be adopted for these reasons, or not at all.
+
+\section{Experimental Method}\label{sec:method}
+\textbf{Instrument.} Each agent call is an isolated Claude subagent at an explicit model
+(Haiku/Sonnet/Opus), tool use disabled; outputs are genuine generations.
+\textbf{Controlled design.} To get clean variance we fix one canonical upstream (one document, one
+extracted-facts text, and one analysis containing all four rubric themes) so the only variables are
+\{model, context strategy, sample\}. Three strategies for the final \emph{writer} stage:
+\emph{naive} (document + facts + analysis), \emph{summary} (a short lossy summary of the analysis,
+i.e.\ a competent summarizing orchestrator), and \emph{TOAP} (the analysis only, i.e.\ the distilled
+slice passed by reference). We draw $n{=}5$ samples per cell for Haiku and $n{=}3$ for Sonnet/Opus
+($n{=}33$ total).
+\textbf{Accuracy (bias-free).} The primary accuracy measure is a \emph{deterministic} rubric checker:
+each of four required actions is detected by keyword sets, with no model in the loop, so it is immune
+to same-family judge bias and exactly reproducible. (A model judge was used only in an earlier
+single-sample run and is not relied upon here.)
+\textbf{Tokens.} Counted with \texttt{tiktoken} (cl100k) on the exact prompts and verbatim outputs.
+\textbf{Reproducibility.} All prompts, verbatim outputs, and the scorer are committed.
+
+\callout{\textbf{Reviewer-driven changes from the first draft.} (1) $n{=}1$ replaced by $n{=}33$ with
+ranges; (2) a \emph{strong} summarizing baseline added alongside the naive one; (3) a deterministic,
+model-independent scorer replaces reliance on a same-family judge; (4) the architecture now flags
+implemented vs.\ proposed; (5) all empirical claims framed as a preliminary pilot.}
+
+\section{Results}\label{sec:results}
+\textbf{Accuracy parity; the regression retracted.} All 33 samples scored 4/4 on the deterministic
+rubric (Figure~\ref{fig:parity}); coverage variance was zero. A 4/4$\rightarrow$3/4 Haiku regression
+seen in an earlier \emph{single-sample} run \textbf{did not reproduce} at $n{=}5$ with a fixed upstream;
+we attribute it to single-sample noise and/or propagation of a weaker upstream analysis, and retract it.
+
+\textbf{Tokens: the summarizing baseline beats TOAP.} Table~\ref{tab:writer} and
+Figure~\ref{fig:threearm} give total writer tokens. Versus the naive baseline, TOAP reduces tokens by
+\textbf{1.88--1.93$\times$} (mean $\sim$1.91$\times$) while the summarizing baseline reduces them by
+\textbf{2.39--2.62$\times$} (mean $\sim$2.54$\times$), \emph{both at 4/4 accuracy}. Reference-passing is
+therefore \emph{not} the most token-efficient strategy; a competent summarizer is. This is the central,
+honest result.
+
+\begin{table}[h]\centering\footnotesize
+\begin{tabular}{llcccc}
+\toprule
+Model & Strategy & $n$ & Accuracy (/4) & Total tokens (mean [min--max]) & Reduction vs.\ naive \\
+\midrule
+Haiku  & naive   & 5 & 4.0 & 505 [491--520] & --- \\
+Haiku  & summary & 5 & 4.0 & 211 [193--219] & 2.39$\times$ \\
+Haiku  & TOAP    & 5 & 4.0 & 268 [258--279] & 1.88$\times$ \\
+Sonnet & naive   & 3 & 4.0 & 512 [499--523] & --- \\
+Sonnet & summary & 3 & 4.0 & 195 [190--204] & 2.62$\times$ \\
+Sonnet & TOAP    & 3 & 4.0 & 266 [265--267] & 1.93$\times$ \\
+Opus   & naive   & 3 & 4.0 & 504 [487--519] & --- \\
+Opus   & summary & 3 & 4.0 & 194 [192--196] & 2.60$\times$ \\
+Opus   & TOAP    & 3 & 4.0 & 263 [253--271] & 1.92$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Controlled writer experiment ($n{=}33$). Accuracy by deterministic rubric (bias-free).
+Tokens via tiktoken. TOAP $<$ naive, but summary $<$ TOAP.}
+\label{tab:writer}
+\end{table}
+
+\begin{figure}[h]\centering
+\begin{minipage}{0.49\textwidth}\centering
+\includegraphics[width=\textwidth]{figures/fig_threearm.png}
+\caption{Writer tokens by strategy (error = min--max). Summary $<$ TOAP $<$ naive.}\label{fig:threearm}
+\end{minipage}\hfill
+\begin{minipage}{0.49\textwidth}\centering
+\includegraphics[width=\textwidth]{figures/fig_parity.png}
+\caption{Accuracy parity: all nine cells 4/4 (the $n{=}1$ regression did not reproduce).}\label{fig:parity}
+\end{minipage}
+\end{figure}
+
+\textbf{Where referencing does win: multi-hop and coordination.} The writer experiment is a single hop.
+In a multi-hop pipeline, referencing avoids re-summarizing/re-sending at \emph{every} hop, and the
+store's send-once/refer-many compounds; an exploratory three-stage run showed 1.65--1.82$\times$
+downstream reductions. Separately, TOAP coordination frames are $\sim$17$\times$ smaller in tokens than
+JSON-RPC equivalents (model-independent, exactly reproducible). These are the regimes where a reference
+protocol, rather than per-hop summarization, is the natural fit --- and where losslessness matters most.
+
+\section{Discussion and Limitations}
+The honest synthesis: \emph{naive transcript accumulation is wasteful; both summarization and
+referencing fix it at equal accuracy here; summarization is cheaper on tokens but lossy; referencing is
+slightly costlier but lossless, secure, and systematic} (\S\ref{sec:why}). The retracted Haiku
+regression is itself a result: \textbf{single-call agent measurements are unsafe}, and apparent
+small-model effects must be checked with replication.
+
+We state threats plainly and treat them as first-class. \textbf{Single model family / one tokenizer:}
+Haiku/Sonnet/Opus differ by scale, not architecture; token claims are tokenizer-dependent, so
+cross-vendor (GPT/Gemini/Llama) replication is required and untested. \textbf{Small $n$ and a single
+task:} $n{=}33$ on one incident scenario with a fixed upstream; broader datasets are needed.
+\textbf{Saturated accuracy:} the four-theme task was easy enough that all strategies reached 4/4, so it
+does not stress the losslessness advantage --- a harder task that needs a detail a summary would drop
+is exactly the missing experiment. \textbf{Scorer:} keyword coverage is bias-free but coarse; it can
+miss paraphrase. \textbf{Judge:} any model judge here is same-family and is used only as a discarded
+secondary check. \textbf{Implementation gap:} the V2 binary control plane, capability lattice,
+cache-coordinate layout, and materialization-with-fallback are now implemented and unit-tested; only
+the actual KV-cache \emph{tensor transport} still requires a model runtime (without one the policy
+degrades to CTX\_REF) and is not benchmarked here.
+
+\textbf{On novelty.} We claim none for the mechanism. The contribution is the controlled, bias-free,
+reproducible accounting --- including the finding that a summarizing baseline beats referencing on
+tokens --- and an architecture that makes the byte/token planes and the materialization choice
+explicit.
+
+\section{Conclusion}
+Reference-minimized inter-agent messaging removes the waste of transcript accumulation at no measured
+accuracy cost, but it is \emph{not} the cheapest strategy: a competent summarizing orchestrator saves
+more tokens. TOAP earns its place only through losslessness, in-band security, and systematization, and
+in multi-hop/coordination regimes where per-hop summarization is awkward and lossiness is risky. We
+release all artifacts and call for cross-vendor, large-$n$, harder-task replication --- especially a
+task that stresses the lossless-vs-lossy distinction --- before any general claim.
+
+\begin{thebibliography}{9}
+\bibitem{erman1980} L.\ Erman, F.\ Hayes-Roth, V.\ Lesser, D.\ Reddy. The Hearsay-II Speech-Understanding
+System (blackboard model). \emph{ACM Computing Surveys} 12(2), 1980.
+\bibitem{mcp} Anthropic. Model Context Protocol specification, 2024--2026. \url{https://modelcontextprotocol.io}.
+\bibitem{a2a} Google / Linux Foundation. Agent2Agent (A2A) Protocol v0.3, 2025--2026. \url{https://a2a-protocol.org}.
+\bibitem{adol} Z.\ Chang, J.\ Li, Z.\ Cao. A Token-Efficient Data Layer for Agents (ADOL). IETF
+Internet-Draft \texttt{draft-chang-agent-token-efficient-01}, Dec.\ 2025.
+\bibitem{promptcache} Anthropic, OpenAI, Google. Prompt caching documentation, 2024--2026.
+\bibitem{talkhier} Z.\ Wang et al. Talk Structurally, Act Hierarchically (TalkHier). arXiv:2502.11098, 2025.
+\bibitem{codeagents} CodeAgents: pseudocode-codified multi-agent messages. arXiv:2507.03254, 2025.
+\bibitem{camel} Google DeepMind. Defeating Prompt Injections by Design (CaMeL). arXiv:2503.18813, 2025.
+\bibitem{kvcomm} KVCOMM: Online Cross-context KV-cache Communication. arXiv:2510.12872, 2025.
+\end{thebibliography}
+
+\appendix
+\section{Reproducibility}
+Artifacts: \texttt{benchmark/ab\_study/} (harness, scenarios, the $n{=}33$ run records
+\texttt{runs/writer\_runs.json}, deterministic scorer \texttt{writer\_experiment.py}, analysis
+\texttt{compute\_writer.py}); \texttt{paper/figures/} (figure scripts); \texttt{paper/METHODS.md} and
+\texttt{paper/REVIEW\_RESPONSE.md} (method log and the reviewer-fix trail). The Rust implementation is
+in \texttt{crates/} (28 unit + integration tests, incl.\ real-TCP end-to-end, V2 binary round-trip,
+capability-lattice flow, cache layout, and KV-bridge fallback). Token reductions recompute exactly
+from the committed records via \texttt{compute\_writer.py}.
+\end{document}

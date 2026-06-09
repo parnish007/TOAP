@@ -8,6 +8,8 @@
 //! Canonical grammar: `docs/protocol_v1.md`. Source identity is **broker-derived**, never read from
 //! a wire field — there is deliberately no `SRC` here.
 
+pub mod v2;
+
 use std::fmt;
 
 /// Message type (the `TYPE` field).

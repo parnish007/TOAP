@@ -1,0 +1,11 @@
+{
+  "id": "scenario_02_support",
+  "title": "Customer support escalation — duplicate charge",
+  "document": "Support case SUP-9931, priority high. Customer Maria (premium plan, 3-year tenure) reports she was charged 79 dollars twice for her annual renewal on April 2 - once at 09:14 and again at 09:16. She opened a ticket the same day; it sat unassigned for 5 days because of a misrouted queue tag. The duplicate charge happened because the billing retry logic re-submitted the payment after a gateway timeout, even though the first charge had already succeeded; the renewal endpoint has no idempotency key. Maria has contacted support twice and left a 1-star review citing 'being ignored for a week.' Finance confirmed both charges cleared. The refund of the duplicate 79 dollars has not yet been issued. The team notes 14 similar duplicate-charge tickets in the last month, all on renewals after gateway timeouts.",
+  "rubric": [
+    "Issue the duplicate 79-dollar refund to the customer immediately",
+    "Add an idempotency key to the renewal/payment endpoint so retries after a gateway timeout cannot double-charge (the root cause)",
+    "Fix the misrouted queue tag and/or add an SLA so high-priority tickets are not left unassigned for days",
+    "Offer a goodwill gesture/apology for the week-long delay and proactively address the 14 similar duplicate-charge cases"
+  ]
+}

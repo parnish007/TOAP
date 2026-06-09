@@ -1,7 +1,4 @@
-pytest>=8.0
-ruff>=0.6
-mypy>=1.10
-msgpack>=1.0
-tiktoken>=0.7
-websockets>=12.0
-
+# Python dependencies for the TOAP benchmarks and paper figures.
+# (The Rust workspace itself needs only a cargo toolchain.)
+tiktoken>=0.7      # tokenizer-accurate token counts (benchmark/*)
+matplotlib>=3.8    # paper figures (paper/figures/gen_*.py)

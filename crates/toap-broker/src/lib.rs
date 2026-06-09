@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
-use toap_context::{Access, Acl, ContextStore};
+use toap_context::{Access, Acl, Capability, ContextStore};
 use toap_core::{encode_frame, parse_frame, Arg, Message, MessageType, Payload};
-use toap_security::{RateConfig, RateLimiter, ReplayGuard, TaintPolicy};
+use toap_security::{RateConfig, RateLimiter, ReplayGuard};
 use toap_wire::{read_frame, write_frame};
 
 type Tx = mpsc::UnboundedSender<String>;
@@ -34,7 +34,6 @@ pub struct State {
     subs: TokioMutex<HashMap<u32, Vec<String>>>,
     rate: TokioMutex<RateLimiter>,
     replay: TokioMutex<ReplayGuard>,
-    taint: TaintPolicy,
     session_counter: AtomicU64,
 }
 
@@ -47,7 +46,6 @@ impl State {
             subs: TokioMutex::new(HashMap::new()),
             rate: TokioMutex::new(RateLimiter::new(RateConfig::default())),
             replay: TokioMutex::new(ReplayGuard::new()),
-            taint: TaintPolicy::default(),
             session_counter: AtomicU64::new(1),
         }
     }
@@ -184,12 +182,14 @@ async fn route(msg: &Message, src: &str, state: &Arc<State>, out_tx: &Tx) {
             // Taint policy: a restricted op cannot run against tainted context.
             {
                 let store = state.store.lock().await;
+                let cap = Capability::for_op(&msg.payload.op);
                 for a in &msg.payload.args {
                     if let Arg::Ctx(id) = a {
                         if let Some(e) = store.get(*id) {
-                            if !state.taint.allows(&msg.payload.op, e.tainted, false) {
+                            // Capability-lattice check (N4): may this provenance flow into this op?
+                            if !e.provenance.permits(cap, false) {
                                 drop(store);
-                                err(out_tx, msg.msg_id, src, "NOPERM", "reason", "tainted_context");
+                                err(out_tx, msg.msg_id, src, "NOPERM", "reason", "capability_denied");
                                 return;
                             }
                         }
@@ -279,9 +279,9 @@ async fn broker_op(msg: &Message, src: &str, state: &Arc<State>, out_tx: &Tx) {
             {
                 let store = state.store.lock().await;
                 if let Some(e) = store.get(id) {
-                    if !state.taint.allows("DEL", e.tainted, false) {
+                    if !e.provenance.permits(Capability::Delete, false) {
                         drop(store);
-                        return err(out_tx, msg.msg_id, src, "NOPERM", "reason", "tainted_context");
+                        return err(out_tx, msg.msg_id, src, "NOPERM", "reason", "capability_denied");
                     }
                 }
             }

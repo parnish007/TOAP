@@ -34,7 +34,7 @@ async fn acl_denies_outsider_read() {
 }
 
 #[tokio::test]
-async fn taint_policy_blocks_restricted_op() {
+async fn capability_lattice_blocks_restricted_op() {
     let addr = start_broker().await;
     let a = Client::connect(&addr, "agentA", "").await.unwrap();
 
@@ -46,7 +46,7 @@ async fn taint_policy_blocks_restricted_op() {
     // A restricted op (EXEC) against tainted context must be refused by the broker.
     let res = a.send_request("worker", Payload::new("EXEC").arg_ctx(id)).await.unwrap();
     assert_eq!(res.payload.op, "NOPERM");
-    assert_eq!(res.payload.get_opt("reason"), Some("tainted_context"));
+    assert_eq!(res.payload.get_opt("reason"), Some("capability_denied"));
 
     // A benign op (SUM) against the same tainted context is allowed to route
     // (it fails only because no 'worker' is connected -> NOAGENT, not NOPERM).

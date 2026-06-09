@@ -1,0 +1,12 @@
+{
+  "id": "scenario_01_incident",
+  "title": "Incident postmortem — payments outage",
+  "document": "Incident INC-4821. On March 3 at 14:02 UTC the payments API latency rose from 120ms to 9.4s and the error rate hit 38% for 47 minutes. The trigger was a marketing campaign that drove roughly 5x normal traffic to the checkout endpoint. The payments service runs 4 fixed pods with no autoscaling. The database connection pool (max 20) saturated, causing requests to queue; the queue had no backpressure, so memory grew and 2 pods OOM-restarted, worsening the outage. A manual scale-up to 12 pods at 14:49 restored service. Revenue impact is estimated at 42,000 dollars. The team had load-tested only at 1x expected traffic. No alert fired for connection-pool saturation; the first signal was customer complaints on social media. No deployment occurred, so rollback was not relevant.",
+  "rubric": [
+    "Enable horizontal autoscaling on the payments service",
+    "Right-size/tune the DB connection pool AND add backpressure",
+    "Add a connection-pool saturation alert so detection beats customer complaints",
+    "Load-test at realistic ~5x traffic before campaigns"
+  ],
+  "note": "The real run for this scenario is recorded at benchmark/runs/run_2026-05-30_subagent_pipeline.json (collected before this folder existed; analyze.py reads it directly)."
+}

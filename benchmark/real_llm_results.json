@@ -1,0 +1,55 @@
+{
+  "baseline": {
+    "prompt": 1243,
+    "completion": 377,
+    "coord": 1321,
+    "total": 2941,
+    "per_agent": [
+      [
+        "extractor",
+        273,
+        154
+      ],
+      [
+        "analyst",
+        421,
+        134
+      ],
+      [
+        "writer",
+        549,
+        89
+      ]
+    ]
+  },
+  "toap": {
+    "prompt": 611,
+    "completion": 377,
+    "coord": 78,
+    "total": 1066,
+    "per_agent": [
+      [
+        "extractor",
+        273,
+        154
+      ],
+      [
+        "analyst",
+        182,
+        134
+      ],
+      [
+        "writer",
+        156,
+        89
+      ]
+    ]
+  },
+  "accuracy_themes_covered": [
+    "autoscal",
+    "pool",
+    "alert",
+    "load"
+  ],
+  "accuracy": 1.0
+}

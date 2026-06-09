@@ -48,20 +48,42 @@ The first implementation uses numeric context IDs as canonical keys.
 
 Reason: numeric IDs are simpler to validate, store, benchmark, and secure. Named aliases can be added later as metadata that maps to numeric IDs.
 
-## Decision 7 - CMake Skeleton Before Targets
+## Decision 7 - Rust Cargo Workspace (supersedes the original C++/CMake plan)
 
-Phase 1 includes a root CMake project with no implementation targets.
+The implementation is a Rust cargo workspace (`crates/toap-core`, `toap-context`, `toap-security`,
+`toap-wire`, `toap-broker`, `toap-client`, `toap-agents`, `toap-mcp`). The original C++/CMake
+prototype was retired after the research pass.
 
-Reason: this validates the local C++ toolchain and gives later phases a stable place to add protocol, broker, storage, and test targets without moving project roots.
+Reason: Rust gives memory safety for an untrusted-message-handling broker, first-class async (Tokio)
+for the networked broker, a single tooling/test story (`cargo test`), and a clean library + binary
+packaging model. Tests use the built-in `#[test]` harness (unit + integration), so no external test
+framework is needed.
 
-## Decision 8 - Assertion-Based Protocol Tests First
+## Decision 8 - Two-Plane Wire Format (V1 text, V2 binary)
 
-Phase 2 uses a small C++ test executable with standard `assert` instead of adding Google Test immediately.
+V1 is a human-readable text frame (`TYPE|MSG_ID|TARGET|PAYLOAD`). V2 adds a compact binary control
+plane (`toap-core::v2`) that round-trips the same message model.
 
-Reason: the protocol core is still small, and avoiding an external test dependency keeps early builds simple. A richer test framework can be added when broker and storage integration tests need fixtures.
+Reason: routing/control metadata (read by the broker) optimizes for bytes, while the LLM-facing
+semantic payload optimizes for tokens. Encoding them separately lets each be near-optimal for its one
+reader. See the paper, §"TOAP Architecture".
 
-## Decision 9 - Static GCC Runtime For Windows Tests
+## Decision 9 - Capability-Lattice Provenance (supersedes boolean taint)
 
-The protocol test executable statically links the GCC runtime on Windows GNU builds.
+Context provenance is a capability lattice: `Origin ∈ {Internal, External, User}`, each carrying the
+set of capabilities its data may flow into (`toap-context::Provenance`). The broker maps each opcode
+to a `Capability` (`Capability::for_op`) and refuses, e.g., `EXEC`/`PAY`/`DELETE` against
+user/external-origin content.
 
-Reason: CTest launched the executable without the MinGW runtime DLLs on PATH. Static runtime linking makes local test execution stable without requiring users to edit environment variables.
+Reason: a single boolean "tainted" flag cannot express "this data may be summarized but must not reach
+an email/exec/pay tool." A capability lattice carries CaMeL-style information-flow constraints with the
+reference itself, so taint survives agent-to-agent hops and is enforced structurally at the broker.
+
+## Decision 10 - Windows GNU Toolchain, Self-Contained Linking
+
+Builds use the `x86_64-pc-windows-gnu` Rust toolchain with self-contained MinGW linking
+(`.cargo/config.toml`), and the build output directory is relocated off the system drive.
+
+Reason: the development host has no MSVC. The bundled `rust-mingw` self-contained libraries avoid a
+dependency on an external GCC's runtime layout. This is a local build-environment decision, not a
+protocol decision.

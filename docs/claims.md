@@ -35,6 +35,23 @@ deterministic task gives the same answers. This proves *no accuracy loss from th
 - Fan-out only wins when the store is co-located/reused; the remote-refetch row shows the weak case.
 - Opcode terseness is a minor win (≤17%); the real win is context-by-ID dedup.
 
+### Evidence tiers (read this before citing any number)
+
+1. **Model-independent, reproducible (strongest):** TOAP wire frames vs JSON-RPC frames, counted with
+   tiktoken. These are properties of the encodings; anyone reproduces them. (`benchmark/runner.py`.)
+2. **Real-LLM measurement, single model (real but limited):** `benchmark/subagent_bench_results.md` —
+   each agent is an isolated Claude subagent; token usage is **runtime-reported**, outputs are
+   genuinely generated, accuracy scored by an **independent** judge subagent. Result on a real
+   3-agent pipeline: **~1.40× fewer model tokens overall, ~1.65× on the downstream stages where TOAP
+   applies, with 4/4 accuracy parity.** Limits: single model family, n=1, large constant subagent
+   overhead calibrated once, judge same-family. This supersedes the earlier inflated "2.76×".
+3. **Simulation, NOT measurement (do not cite as real):** `benchmark/real_llm_bench.py` — the agent
+   outputs there are author-written string literals with no captured usage. Token counts are real but
+   the "LLM inference" is not; keep it only as an illustrative harness.
+
+For a publishable claim, tier 2 must be redone with ≥2 independent models, n≫1 with variance, and an
+independent (different-family) judge — see `benchmark/subagent_bench_results.md` limitations.
+
 ## Design Targets
 
 These are targets to test later:

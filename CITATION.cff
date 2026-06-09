@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+title: "TOAP: The Token-Optimized Agent Protocol"
+message: "If you use this software or paper, please cite it as below."
+type: software
+authors:
+  - family-names: Sharma
+    given-names: Trilochan
+    email: parnishklpo@gmail.com
+    affiliation: Independent Researcher
+repository-code: "https://github.com/parnish007/TOAP"
+abstract: >-
+  TOAP is a reference-minimized, two-plane protocol for inter-agent messaging in
+  multi-agent LLM systems. Shared content is stored once and exchanged by
+  reference rather than re-transmitted, with a byte-optimized control plane
+  separated from a tokenizer-aligned semantic plane, a broker-mediated context
+  store with per-context ACLs and capability-lattice provenance, and a reference
+  materialization spectrum. The accompanying paper reports an honest token
+  accounting (symbolic opcodes save bytes but few tokens) and a controlled
+  multi-model pilot showing that a summarizing baseline can beat reference
+  passing on tokens at equal accuracy, so TOAP's value rests on losslessness,
+  in-band security, and systematization.
+keywords:
+  - multi-agent systems
+  - large language models
+  - agent protocol
+  - token efficiency
+  - context management
+  - prompt injection
+license: MIT
+version: "1.0.0"
+date-released: "2026-05-30"

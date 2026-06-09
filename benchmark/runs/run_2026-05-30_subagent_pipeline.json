@@ -1,0 +1,77 @@
+{
+  "_about": "RAW, VERBATIM record of one real subagent-instrumented benchmark run. Each call was an isolated Claude subagent (tool_uses=0). 'subagent_tokens' is the runtime-reported usage as returned by the harness (NOT author-computed and NOT re-derivable, since it is nondeterministic). Prompts and outputs are stored verbatim so anyone can re-tokenize them with tiktoken (see crosscheck.py) and inspect exactly what was sent and returned. Agent-ids are the runtime trace.",
+  "model": "Claude (Claude Code subagents, general-purpose). Single model family. n=1.",
+  "date": "2026-05-30",
+  "overhead_calibration_subagent_tokens": 11741,
+  "known_wrinkles": [
+    "writer_baseline received the document verbatim PLUS condensed (not verbatim) upstream summaries; a true full-transcript baseline would be larger, so the writer-stage TOAP advantage is understated/conservative.",
+    "n=1: per-call subagent_tokens is a single nondeterministic sample; small deltas may include noise.",
+    "subagent_tokens is one total (prompt+reasoning+output), not split.",
+    "judge is the same model family (fresh, blind A/B, no in-context stake)."
+  ],
+  "calls": [
+    {
+      "id": "calibration",
+      "role": "calibration",
+      "arm": "n/a",
+      "agent_id": "ae24c2a4c350bc698",
+      "subagent_tokens": 11741,
+      "prompt": "Do not use any tools. Do not read files or search anything. Respond directly with exactly one word and nothing else: READY",
+      "output": "READY"
+    },
+    {
+      "id": "extractor",
+      "role": "extractor",
+      "arm": "shared",
+      "agent_id": "abb4ada1a6cad5de5",
+      "subagent_tokens": 12459,
+      "prompt": "You are an EXTRACTION agent in a multi-agent pipeline. Do not use any tools. Do not read files or search. Respond directly.\n\nFrom the incident report below, extract the key structured facts only (trigger, metrics, topology, failure chain, impact, and gaps). Be factual and concise - at most 120 words. Output just the facts, no preamble.\n\nIncident report:\n\"Incident INC-4821. On March 3 at 14:02 UTC the payments API latency rose from 120ms to 9.4s and the error rate hit 38% for 47 minutes. The trigger was a marketing campaign that drove roughly 5x normal traffic to the checkout endpoint. The payments service runs 4 fixed pods with no autoscaling. The database connection pool (max 20) saturated, causing requests to queue; the queue had no backpressure, so memory grew and 2 pods OOM-restarted, worsening the outage. A manual scale-up to 12 pods at 14:49 restored service. Revenue impact is estimated at 42,000 dollars. The team had load-tested only at 1x expected traffic. No alert fired for connection-pool saturation; the first signal was customer complaints on social media. No deployment occurred, so rollback was not relevant. Proposed action items: (1) enable horizontal autoscaling on the payments service, (2) raise and tune the DB connection pool and add backpressure, (3) add a saturation alert on pool usage, (4) load-test at 5x before campaigns.\"",
+      "output": "Trigger: Marketing campaign drove ~5x normal traffic to the checkout endpoint (INC-4821, March 3, 14:02 UTC).\n\nMetrics: Latency 120ms to 9.4s; error rate 38%; 47-minute duration.\n\nTopology: Payments service on 4 fixed pods, no autoscaling; DB connection pool max 20.\n\nFailure chain: Pool saturated to queue requests; no backpressure to memory growth to 2 pods OOM-restarted to worsened outage. Manual scale-up to 12 pods at 14:49 restored service.\n\nImpact: ~$42,000 revenue loss.\n\nGaps: Load-tested only at 1x; no connection-pool saturation alert (first signal was social-media complaints); no deployment, so rollback irrelevant."
+    },
+    {
+      "id": "analyst_baseline",
+      "role": "analyst",
+      "arm": "baseline",
+      "agent_id": "aec967fc2d695ea4e",
+      "subagent_tokens": 12733,
+      "prompt": "You are an ANALYSIS agent in a multi-agent pipeline. Do not use any tools. Do not read files or search. Respond directly.\n\nGiven the incident report AND the extracted facts below, state the root cause, the severity, and what would have prevented it. At most 120 words. Output just the analysis, no preamble.\n\nIncident report:\n\"Incident INC-4821. On March 3 at 14:02 UTC the payments API latency rose from 120ms to 9.4s and the error rate hit 38% for 47 minutes. The trigger was a marketing campaign that drove roughly 5x normal traffic to the checkout endpoint. The payments service runs 4 fixed pods with no autoscaling. The database connection pool (max 20) saturated, causing requests to queue; the queue had no backpressure, so memory grew and 2 pods OOM-restarted, worsening the outage. A manual scale-up to 12 pods at 14:49 restored service. Revenue impact is estimated at 42,000 dollars. The team had load-tested only at 1x expected traffic. No alert fired for connection-pool saturation; the first signal was customer complaints on social media. No deployment occurred, so rollback was not relevant. Proposed action items: (1) enable horizontal autoscaling on the payments service, (2) raise and tune the DB connection pool and add backpressure, (3) add a saturation alert on pool usage, (4) load-test at 5x before campaigns.\"\n\nExtracted facts:\n\"Trigger: Marketing campaign drove ~5x normal traffic to the checkout endpoint (INC-4821, March 3, 14:02 UTC). Metrics: Latency 120ms to 9.4s; error rate 38%; 47-minute duration. Topology: Payments service on 4 fixed pods, no autoscaling; DB connection pool max 20. Failure chain: Pool saturated to queue requests; no backpressure to memory growth to 2 pods OOM-restarted to worsened outage. Manual scale-up to 12 pods at 14:49 restored service. Impact: ~$42,000 revenue loss. Gaps: Load-tested only at 1x; no connection-pool saturation alert (first signal was social-media complaints); no deployment, so rollback irrelevant.\"",
+      "output": "Root cause: An unbuffered capacity mismatch. A 5x traffic surge from a marketing campaign overwhelmed a payments service running 4 fixed pods with no autoscaling and a DB connection pool capped at 20. The pool saturated, requests queued without backpressure, memory grew, and 2 pods OOM-restarted, amplifying the outage until a manual scale-up at 14:49.\n\nSeverity: High. 47-minute payments degradation (9.4s latency, 38% errors) with ~$42,000 revenue loss; customer-facing and detected only via social media.\n\nPrevention: Horizontal autoscaling, a tuned/larger DB pool with backpressure, a connection-pool saturation alert (instead of relying on customer complaints), and pre-campaign load-testing at realistic 5x traffic would have averted or quickly contained it."
+    },
+    {
+      "id": "analyst_toap",
+      "role": "analyst",
+      "arm": "toap",
+      "agent_id": "aaab237f12a12128c",
+      "subagent_tokens": 12368,
+      "prompt": "You are an ANALYSIS agent in a multi-agent pipeline. Do not use any tools. Do not read files or search. Respond directly.\n\nGiven the extracted facts below, state the root cause, the severity, and what would have prevented it. At most 120 words. Output just the analysis, no preamble.\n\nExtracted facts:\n\"Trigger: Marketing campaign drove ~5x normal traffic to the checkout endpoint (INC-4821, March 3, 14:02 UTC). Metrics: Latency 120ms to 9.4s; error rate 38%; 47-minute duration. Topology: Payments service on 4 fixed pods, no autoscaling; DB connection pool max 20. Failure chain: Pool saturated to queue requests; no backpressure to memory growth to 2 pods OOM-restarted to worsened outage. Manual scale-up to 12 pods at 14:49 restored service. Impact: ~$42,000 revenue loss. Gaps: Load-tested only at 1x; no connection-pool saturation alert (first signal was social-media complaints); no deployment, so rollback irrelevant.\"",
+      "output": "Root cause: A capacity bottleneck under load. The payments service had no autoscaling (4 fixed pods) and a hard DB connection-pool ceiling (max 20). When the campaign drove 5x traffic, the pool saturated and requests queued without backpressure, causing unbounded memory growth, OOM restarts of 2 pods, and a cascading failure.\n\nSeverity: High. Customer-facing checkout was degraded for 47 minutes (38% errors, 9.4s latency) with ~$42,000 direct revenue loss.\n\nPrevention: Autoscaling on the payments service; load testing at realistic peak multiples (not just 1x) to expose pool limits; bounded queues with backpressure and request shedding; right-sized pool plus a connection-pool saturation alert so detection beats social-media complaints. Coordinating capacity planning with marketing on known traffic spikes would also have helped."
+    },
+    {
+      "id": "writer_baseline",
+      "role": "writer",
+      "arm": "baseline",
+      "agent_id": "a513f0292bb11fa40",
+      "subagent_tokens": 12685,
+      "prompt": "You are a WRITER agent in a multi-agent pipeline. Do not use any tools. Do not read files or search. Respond directly.\n\nGiven the incident report, the extracted facts, and the analysis below, produce the top prioritized action items as a short recommendation. At most 120 words. Output just the recommendation.\n\nIncident report:\n\"Incident INC-4821. On March 3 at 14:02 UTC the payments API latency rose from 120ms to 9.4s and the error rate hit 38% for 47 minutes. The trigger was a marketing campaign that drove roughly 5x normal traffic to the checkout endpoint. The payments service runs 4 fixed pods with no autoscaling. The database connection pool (max 20) saturated, causing requests to queue; the queue had no backpressure, so memory grew and 2 pods OOM-restarted, worsening the outage. A manual scale-up to 12 pods at 14:49 restored service. Revenue impact is estimated at 42,000 dollars. The team had load-tested only at 1x expected traffic. No alert fired for connection-pool saturation; the first signal was customer complaints on social media. No deployment occurred, so rollback was not relevant.\"\n\nExtracted facts:\n\"Trigger: 5x traffic from a campaign. Topology: 4 fixed pods, no autoscaling; DB pool max 20. Failure chain: pool saturated to queue to no backpressure to memory growth to 2 pods OOM. Manual scale to 12 pods restored it. Impact ~$42,000. Gaps: 1x-only load test; no pool saturation alert; social-media was first signal.\"\n\nAnalysis:\n\"Root cause: An unbuffered capacity mismatch. A 5x traffic surge overwhelmed a payments service running 4 fixed pods with no autoscaling and a DB connection pool capped at 20. The pool saturated, requests queued without backpressure, memory grew, and 2 pods OOM-restarted. Severity: High (47-min degradation, 38% errors, ~$42,000 loss, detected via social media). Prevention: horizontal autoscaling, a tuned/larger DB pool with backpressure, a connection-pool saturation alert, and pre-campaign load-testing at realistic 5x traffic.\"",
+      "output": "Prioritized actions:\n\n1. Add horizontal pod autoscaling for the payments service so capacity tracks traffic surges automatically (would have prevented the core failure).\n2. Implement a connection-pool saturation alert; detection via social media is unacceptable. Pair with end-to-end latency/error-rate alerting.\n3. Add backpressure/request shedding at the queue to stop memory growth and OOM cascades when the DB pool (max 20) saturates; tune pool size.\n4. Make pre-campaign load testing at realistic 5x traffic mandatory, gated with marketing's traffic forecasts.\n\nQuick win: pre-scale pods ahead of known campaigns until autoscaling ships."
+    },
+    {
+      "id": "writer_toap",
+      "role": "writer",
+      "arm": "toap",
+      "agent_id": "acf07087c5b86fcbd",
+      "subagent_tokens": 12288,
+      "prompt": "You are a WRITER agent in a multi-agent pipeline. Do not use any tools. Do not read files or search. Respond directly.\n\nGiven the analysis below, produce the top prioritized action items as a short recommendation. At most 120 words. Output just the recommendation.\n\nAnalysis:\n\"Root cause: A capacity bottleneck under load. The payments service had no autoscaling (4 fixed pods) and a hard DB connection-pool ceiling (max 20). When the campaign drove 5x traffic, the pool saturated and requests queued without backpressure, causing unbounded memory growth, OOM restarts of 2 pods, and a cascading failure. Severity: High. Customer-facing checkout was degraded for 47 minutes (38% errors, 9.4s latency) with ~$42,000 direct revenue loss. Prevention: Autoscaling on the payments service; load testing at realistic peak multiples (not just 1x) to expose pool limits; bounded queues with backpressure and request shedding; right-sized pool plus a connection-pool saturation alert so detection beats social-media complaints. Coordinating capacity planning with marketing on known traffic spikes would also have helped.\"",
+      "output": "Prioritized actions:\n\n1. Enable autoscaling on the payments service to handle traffic surges instead of fixed 4 pods.\n2. Right-size the DB connection pool and add a pool-saturation alert so detection beats customer complaints.\n3. Implement bounded queues with backpressure and request shedding to prevent unbounded memory growth and OOM cascades.\n4. Add load testing at realistic peak multiples (5x+, not 1x) to surface pool and capacity limits before launches.\n5. Coordinate capacity planning with marketing ahead of known campaigns and traffic spikes."
+    },
+    {
+      "id": "judge",
+      "role": "judge",
+      "arm": "independent",
+      "agent_id": "aff8d323ddeb32687",
+      "subagent_tokens": 12394,
+      "prompt": "You are an EVALUATION agent. Do not use any tools. Respond directly and objectively. A correct incident-response recommendation MUST cover 4 required actions: (1) horizontal autoscaling; (2) right-size/tune the DB connection pool AND add backpressure; (3) add a connection-pool saturation alert; (4) load-test at realistic ~5x traffic before campaigns. Score each recommendation (A and B) by how many of the 4 it covers (0-4), strictly, listing any missing items. [Recommendation A = writer_baseline output; Recommendation B = writer_toap output; presented blind.]",
+      "output": "A: 4/4 ; missing: none\nB: 4/4 ; missing: none"
+    }
+  ]
+}

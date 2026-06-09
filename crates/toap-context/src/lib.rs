@@ -8,7 +8,7 @@
 //!     **delta log** with field-level patches (the `DLT` message type).
 //! See `research.md` §8.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_secs() -> u64 {
@@ -145,6 +145,177 @@ pub fn choose_materialization(id: u32, content: &[u8], d: RefDecision) -> Materi
 }
 
 // ---------------------------------------------------------------------------
+// Capability lattice (N4) — replaces the earlier boolean taint with a provenance + allowed-capability
+// model (CaMeL-style information flow). Origin forms a lattice Internal ⊒ External ⊒ User; each origin
+// carries the set of capabilities that data may flow into. `permits` is the structural check the
+// broker uses to refuse, e.g., routing user-originated content into an EXEC/EMAIL/PAY/DEL operation.
+// ---------------------------------------------------------------------------
+
+/// What an operation wants to do with content (mapped from the wire opcode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Capability {
+    Read,
+    Summarize,
+    Transform,
+    Classify,
+    Execute,
+    Email,
+    Pay,
+    Delete,
+}
+
+impl Capability {
+    /// Map a wire opcode to the capability it exercises (unknown ops are treated as Execute = strict).
+    pub fn for_op(op: &str) -> Capability {
+        match op {
+            "GET" | "ANS" | "RET" | "LST" => Capability::Read,
+            "SUM" => Capability::Summarize,
+            "XFM" | "TRN" | "MRG" | "SET" | "PATCH" => Capability::Transform,
+            "CLS" | "VLD" | "CMP" => Capability::Classify,
+            "DEL" => Capability::Delete,
+            "EMAIL" => Capability::Email,
+            "PAY" => Capability::Pay,
+            "EXEC" | "SHELL" => Capability::Execute,
+            _ => Capability::Execute,
+        }
+    }
+}
+
+/// Where content came from (the lattice level).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Internal,
+    External,
+    User,
+}
+
+/// Provenance tag carried by a context: its origin plus the capabilities its data may flow into.
+#[derive(Debug, Clone)]
+pub struct Provenance {
+    pub origin: Origin,
+    pub allowed: HashSet<Capability>,
+}
+
+impl Default for Provenance {
+    fn default() -> Self {
+        Provenance::external()
+    }
+}
+
+impl Provenance {
+    fn set(caps: &[Capability]) -> HashSet<Capability> {
+        caps.iter().copied().collect()
+    }
+
+    /// Trusted internal content: all capabilities permitted.
+    pub fn internal() -> Self {
+        Provenance {
+            origin: Origin::Internal,
+            allowed: Self::set(&[
+                Capability::Read, Capability::Summarize, Capability::Transform, Capability::Classify,
+                Capability::Execute, Capability::Email, Capability::Pay, Capability::Delete,
+            ]),
+        }
+    }
+
+    /// External (third-party) content: read/summarize/transform/classify only — no side effects.
+    pub fn external() -> Self {
+        Provenance {
+            origin: Origin::External,
+            allowed: Self::set(&[
+                Capability::Read, Capability::Summarize, Capability::Transform, Capability::Classify,
+            ]),
+        }
+    }
+
+    /// User-originated content: the most restricted — read/summarize/classify, no transform or effects.
+    pub fn user() -> Self {
+        Provenance {
+            origin: Origin::User,
+            allowed: Self::set(&[Capability::Read, Capability::Summarize, Capability::Classify]),
+        }
+    }
+
+    /// Does this provenance permit `cap`? (`elevated` is a broker-policy override.)
+    pub fn permits(&self, cap: Capability, elevated: bool) -> bool {
+        elevated || self.allowed.contains(&cap)
+    }
+
+    /// True if the content is not trusted-internal (the boolean-taint compatibility view).
+    pub fn is_tainted(&self) -> bool {
+        self.origin != Origin::Internal
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-band cache coordinate (N4) — lets a reference cooperate with provider prefix-caching by marking
+// which references belong in the stable cacheable prefix vs the volatile suffix.
+// ---------------------------------------------------------------------------
+
+/// Where a referenced span sits in a provider's KV/prefix cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheCoord {
+    pub provider: String,
+    pub breakpoint: u32,
+    pub position: u32,
+    /// Stable content belongs in the cacheable prefix; volatile content in the suffix.
+    pub stable: bool,
+}
+
+/// Order references so stable (cacheable-prefix) ones precede volatile ones, preserving relative
+/// order within each group. Laying messages out this way lets provider prefix-caching and TOAP
+/// dedup compound instead of the protocol invalidating the cache.
+pub fn cache_layout(refs: &[(u32, bool)]) -> Vec<u32> {
+    let mut stable: Vec<u32> = refs.iter().filter(|(_, s)| *s).map(|(id, _)| *id).collect();
+    let volatile: Vec<u32> = refs.iter().filter(|(_, s)| !*s).map(|(id, _)| *id).collect();
+    stable.extend(volatile);
+    stable
+}
+
+// ---------------------------------------------------------------------------
+// KV-bridge transport (N3, optional) — the decision/fallback policy is implemented and tested here;
+// the actual tensor transfer requires a model runtime and is provided by an external `KvTransport`.
+// With no runtime (NoopKvTransport) the policy gracefully degrades KV_BRIDGE -> CTX_REF -> INLINE.
+// ---------------------------------------------------------------------------
+
+/// Abstracts the (model-runtime-specific) ability to obtain a reusable KV handle for a context.
+pub trait KvTransport {
+    /// Return a handle id if a reusable KV cache for `ctx` under `model` is available, else `None`.
+    fn fetch(&self, ctx: u32, model: &str) -> Option<String>;
+}
+
+/// No model runtime available: KV transfer always declines, forcing graceful fallback.
+pub struct NoopKvTransport;
+impl KvTransport for NoopKvTransport {
+    fn fetch(&self, _ctx: u32, _model: &str) -> Option<String> {
+        None
+    }
+}
+
+/// Constraint-guarded materialization with graceful fallback. Tries KV_BRIDGE only when the cost
+/// model and constraints allow AND the transport actually has a handle; otherwise falls back to the
+/// text-plane choice (CTX_REF / INLINE). Always benchmark against text+prefix-cache, never re-prefill.
+pub fn materialize_with_fallback(
+    id: u32,
+    content: &[u8],
+    d: RefDecision,
+    model: &str,
+    kv: &dyn KvTransport,
+) -> Materialization {
+    const KV_MIN: usize = 8192;
+    if d.same_model && d.content_len >= KV_MIN {
+        if kv.fetch(id, model).is_some() {
+            return Materialization::KvBridge { ctx: id, model: model.to_string() };
+        }
+        // transport declined (e.g. no runtime, RoPE-offset/tokenizer mismatch) -> fall back.
+    }
+    // Fall back to the text-plane choice. Disable the KV branch so a declined bridge does not
+    // get re-selected by the chooser (graceful degradation KV_BRIDGE -> CTX_REF -> INLINE).
+    let text_only = RefDecision { same_model: false, ..d };
+    choose_materialization(id, content, text_only)
+}
+
+// ---------------------------------------------------------------------------
 // Context entry + store
 // ---------------------------------------------------------------------------
 
@@ -165,7 +336,10 @@ pub struct ContextEntry {
     pub owner: String,
     pub data: Vec<u8>,
     /// True for externally/user-originated content. Default-taint is the safe policy (CaMeL-style).
+    /// Kept for compatibility; the richer view is `provenance` (capability lattice, N4).
     pub tainted: bool,
+    /// Capability-lattice provenance (N4): origin + the capabilities this data may flow into.
+    pub provenance: Provenance,
     pub acl: Acl,
     pub created_at: u64,
     /// Absolute expiry time (0 = never).
@@ -207,6 +381,7 @@ impl ContextStore {
     }
 
     /// Store new content, returning its assigned numeric context ID.
+    /// `tainted` is the compatibility flag; provenance is derived (tainted -> External, else Internal).
     pub fn set(
         &mut self,
         owner: &str,
@@ -215,10 +390,24 @@ impl ContextStore {
         acl: Acl,
         ttl_secs: u32,
     ) -> u32 {
+        let prov = if tainted { Provenance::external() } else { Provenance::internal() };
+        self.set_with_provenance(owner, data, prov, acl, ttl_secs)
+    }
+
+    /// Store new content with an explicit capability-lattice provenance (N4).
+    pub fn set_with_provenance(
+        &mut self,
+        owner: &str,
+        data: Vec<u8>,
+        provenance: Provenance,
+        acl: Acl,
+        ttl_secs: u32,
+    ) -> u32 {
         let id = self.next;
         self.next += 1;
         let created = now_secs();
         let expires_at = if ttl_secs == 0 { 0 } else { created + ttl_secs as u64 };
+        let tainted = provenance.is_tainted();
         self.map.insert(
             id,
             ContextEntry {
@@ -226,6 +415,7 @@ impl ContextStore {
                 owner: owner.to_string(),
                 data,
                 tainted,
+                provenance,
                 acl,
                 created_at: created,
                 expires_at,
@@ -386,5 +576,66 @@ mod tests {
             content_len: big.len(), ref_count: 2, same_model: true, colocated_store: true,
         });
         assert!(matches!(m, Materialization::KvBridge { ctx: 7, .. }));
+    }
+
+    #[test]
+    fn capability_lattice_contains_flow() {
+        let user = Provenance::user();
+        assert!(user.permits(Capability::Summarize, false)); // benign read/summarize ok
+        assert!(!user.permits(Capability::Execute, false)); // user data cannot drive EXEC
+        assert!(!user.permits(Capability::Pay, false));
+        assert!(user.permits(Capability::Execute, true)); // elevated override
+        assert!(Provenance::internal().permits(Capability::Pay, false)); // trusted: all caps
+        assert!(Provenance::external().permits(Capability::Transform, false));
+        assert!(!Provenance::external().permits(Capability::Delete, false));
+        assert!(user.is_tainted() && !Provenance::internal().is_tainted());
+    }
+
+    #[test]
+    fn opcode_capability_mapping() {
+        assert_eq!(Capability::for_op("SUM"), Capability::Summarize);
+        assert_eq!(Capability::for_op("EXEC"), Capability::Execute);
+        assert_eq!(Capability::for_op("WAT"), Capability::Execute); // unknown -> strict
+        assert_eq!(Capability::for_op("GET"), Capability::Read);
+    }
+
+    #[test]
+    fn store_default_provenance() {
+        let mut s = ContextStore::new();
+        let tid = s.set("a", b"x".to_vec(), true, Acl::parse("*:r"), 0);
+        let uid = s.set_with_provenance("a", b"y".to_vec(), Provenance::user(), Acl::parse("*:r"), 0);
+        assert_eq!(s.get(tid).unwrap().provenance.origin, Origin::External);
+        assert_eq!(s.get(uid).unwrap().provenance.origin, Origin::User);
+        let clean = s.set("a", b"z".to_vec(), false, Acl::parse("*:r"), 0);
+        assert_eq!(s.get(clean).unwrap().provenance.origin, Origin::Internal);
+    }
+
+    #[test]
+    fn cache_layout_puts_stable_first() {
+        // ids 1,3 stable; 2,4 volatile -> stable prefix then volatile suffix, order preserved
+        let out = cache_layout(&[(1, true), (2, false), (3, true), (4, false)]);
+        assert_eq!(out, vec![1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn kv_bridge_falls_back_without_runtime() {
+        let big = vec![0u8; 9000];
+        let d = RefDecision { content_len: big.len(), ref_count: 2, same_model: true, colocated_store: true };
+        // No runtime: even a same-model long context degrades to CtxRef (graceful fallback).
+        let m = materialize_with_fallback(7, &big, d, "llama3-8b", &NoopKvTransport);
+        assert_eq!(m, Materialization::CtxRef(7));
+
+        // A transport that has a handle returns KV_BRIDGE.
+        struct Stub;
+        impl KvTransport for Stub {
+            fn fetch(&self, _c: u32, _m: &str) -> Option<String> { Some("h1".into()) }
+        }
+        let m2 = materialize_with_fallback(7, &big, d, "llama3-8b", &Stub);
+        assert!(matches!(m2, Materialization::KvBridge { ctx: 7, .. }));
+
+        // Cross-model (same_model=false) never bridges, even with a willing transport.
+        let d2 = RefDecision { same_model: false, ..d };
+        let m3 = materialize_with_fallback(7, &big, d2, "llama3-8b", &Stub);
+        assert_eq!(m3, Materialization::CtxRef(7));
     }
 }

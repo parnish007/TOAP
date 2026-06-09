@@ -82,3 +82,10 @@ target/
 
 # Benchmark artifacts (results.md is kept intentionally)
 benchmark/results.json
+
+# LaTeX build artifacts (keep main.pdf, drop the rest)
+paper/*.aux
+paper/*.out
+paper/*.toc
+paper/*.fls
+paper/*.fdb_latexmk

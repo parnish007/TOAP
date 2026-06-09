@@ -1,0 +1,113 @@
+{
+  "prompt_tokens_per_arm": {
+    "naive": 415,
+    "summary": 127,
+    "toap": 186
+  },
+  "cells": {
+    "haiku/naive": {
+      "n": 5,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 90.4,
+      "tot_tok_mean": 505.4,
+      "tot_tok_min": 491,
+      "tot_tok_max": 520
+    },
+    "haiku/summary": {
+      "n": 5,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 84.4,
+      "tot_tok_mean": 211.4,
+      "tot_tok_min": 193,
+      "tot_tok_max": 219
+    },
+    "haiku/toap": {
+      "n": 5,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 82.2,
+      "tot_tok_mean": 268.2,
+      "tot_tok_min": 258,
+      "tot_tok_max": 279
+    },
+    "opus/naive": {
+      "n": 3,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 89.3,
+      "tot_tok_mean": 504.3,
+      "tot_tok_min": 487,
+      "tot_tok_max": 519
+    },
+    "opus/summary": {
+      "n": 3,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 67,
+      "tot_tok_mean": 194,
+      "tot_tok_min": 192,
+      "tot_tok_max": 196
+    },
+    "opus/toap": {
+      "n": 3,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 76.7,
+      "tot_tok_mean": 262.7,
+      "tot_tok_min": 253,
+      "tot_tok_max": 271
+    },
+    "sonnet/naive": {
+      "n": 3,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 97,
+      "tot_tok_mean": 512,
+      "tot_tok_min": 499,
+      "tot_tok_max": 523
+    },
+    "sonnet/summary": {
+      "n": 3,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 68.3,
+      "tot_tok_mean": 195.3,
+      "tot_tok_min": 190,
+      "tot_tok_max": 204
+    },
+    "sonnet/toap": {
+      "n": 3,
+      "acc_mean": 4,
+      "acc_min": 4,
+      "acc_max": 4,
+      "out_tok_mean": 79.7,
+      "tot_tok_mean": 265.7,
+      "tot_tok_min": 265,
+      "tot_tok_max": 267
+    }
+  },
+  "reduction_vs_naive": {
+    "haiku": {
+      "summary": 2.391,
+      "toap": 1.884
+    },
+    "opus": {
+      "summary": 2.6,
+      "toap": 1.92
+    },
+    "sonnet": {
+      "summary": 2.621,
+      "toap": 1.927
+    }
+  }
+}
