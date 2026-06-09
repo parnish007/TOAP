@@ -410,7 +410,7 @@ sequenceDiagram
     Br->>St: put as CTX:1
     O->>Br: REQ SUM CTX:1
     Note over Br: check identity, ACL, capability, rate, replay
-    Note over Br: doc is User-origin so SUM is allowed; EXEC would be refused
+    Note over Br: doc is User-origin so SUM is allowed and EXEC would be refused
     Br->>W: deliver CTX:1
     Note over W: materialize CTX:1 then read and summarize
     W->>Br: OK CTX:2

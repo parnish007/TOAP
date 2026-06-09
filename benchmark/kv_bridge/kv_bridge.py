@@ -11,75 +11,145 @@ context's KV is computed at absolute positions 0..n; the query is appended at po
 absolute positions stay valid (this is the constraint the literature flags — we respect it instead of
 pretending it away). Splicing a cache baked at different positions is explicitly NOT done here.
 
-What it provides:
-  - extract_kv(model, prefix_ids)            -> past_key_values for the shared context (the "produce")
-  - serialize_kv / deserialize_kv            -> bytes over the wire (the "transfer"); measures real size
-  - kv_byte_size(kv)                          -> honest cost accounting
-  - generate_recompute(...)                  -> baseline: prefill prefix+query from scratch
-  - generate_kv_bridge(...)                   -> reuse transferred prefix KV, prefill only the query
+We measure two costs separately and honestly:
+  * COMPUTE win   = prefill latency of (recompute prefix+query)  vs (prefill ONLY the query).
+  * TRANSFER cost = serialize + move + deserialize the KV tensors, and their byte size vs the text.
+A real deployment co-locates producer and consumer (shared GPU / NVLink / RDMA), so the headline win is
+the compute side; the transfer cost is reported so the trade-off is never hidden.
 
-Run the benchmark with kv_bench.py. This file is import-only logic + a tiny self-check.
+Robust across transformers versions: tolerates DynamicCache, legacy tuples, and layers whose key/value
+are temporarily ``None``; GQA-aware (counts real KV-head tensors).
 """
 from __future__ import annotations
 import io
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.cache_utils import DynamicCache
+
+try:
+    from transformers.cache_utils import DynamicCache
+except Exception:  # very old transformers
+    DynamicCache = None
 
 
-def load(model_name: str, dtype=None, device=None):
+def load(model_name: str, dtype=None, device=None, load_in_4bit: bool = False):
+    """Load tokenizer + model. Uses the modern ``dtype=`` arg; optional 4-bit via bitsandbytes."""
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     if dtype is None:
         dtype = torch.float16 if device == "cuda" else torch.float32
     tok = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).to(device).eval()
+    kwargs = {}
+    if load_in_4bit:
+        from transformers import BitsAndBytesConfig
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_compute_dtype=dtype, bnb_4bit_quant_type="nf4")
+        kwargs["device_map"] = "auto"
+    else:
+        kwargs["dtype"] = dtype          # modern transformers (replaces deprecated torch_dtype)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+    except TypeError:
+        # older transformers that still want torch_dtype
+        kwargs.pop("dtype", None)
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, **kwargs)
+    if not load_in_4bit:
+        model = model.to(device)
+    model.eval()
     return tok, model, device
 
 
+def model_context_limit(tok, model, fallback: int = 4096) -> int:
+    """Best-effort maximum sequence length the model+tokenizer support."""
+    for attr in ("n_positions", "max_position_embeddings"):
+        v = getattr(model.config, attr, None)
+        if isinstance(v, int) and 0 < v < 1_000_000:
+            return v
+    v = getattr(tok, "model_max_length", None)
+    if isinstance(v, int) and 0 < v < 1_000_000:
+        return v
+    return fallback
+
+
 # ---------------------------------------------------------------------------
-# KV extraction / transfer
+# KV extraction / transfer  (version-robust)
 # ---------------------------------------------------------------------------
 
-def _to_legacy(past):
-    """Normalize a DynamicCache or legacy tuple to the legacy tuple-of-(k,v) form."""
+def _iter_layers(past):
+    """Yield (key, value) per layer from a DynamicCache or legacy tuple. Skips None placeholders."""
+    if past is None:
+        return
+    # legacy tuple/list form: ((k, v), (k, v), ...)
+    if isinstance(past, (tuple, list)):
+        for layer in past:
+            if layer is None:
+                continue
+            k, v = layer[0], layer[1]
+            yield k, v
+        return
+    # DynamicCache (newer): prefer .to_legacy_cache(), else .key_cache/.value_cache
     if hasattr(past, "to_legacy_cache"):
-        return past.to_legacy_cache()
-    return past
+        try:
+            legacy = past.to_legacy_cache()
+            for layer in legacy:
+                if layer is None:
+                    continue
+                yield layer[0], layer[1]
+            return
+        except Exception:
+            pass
+    kc = getattr(past, "key_cache", None)
+    vc = getattr(past, "value_cache", None)
+    if kc is not None and vc is not None:
+        for k, v in zip(kc, vc):
+            yield k, v
 
 
 @torch.no_grad()
 def extract_kv(model, prefix_ids):
-    """Prefill the shared context once and return its KV cache (legacy tuple form)."""
+    """Prefill the shared context once and return its KV cache (as the model produced it)."""
     out = model(prefix_ids, use_cache=True)
-    return _to_legacy(out.past_key_values)
+    return out.past_key_values
 
 
-def kv_byte_size(past_legacy) -> int:
-    """Real size of the KV cache in bytes (sum of all key/value tensors)."""
+def kv_byte_size(past) -> int:
+    """Real size of the KV cache in bytes (sum of all key/value tensors; GQA-aware, None-safe)."""
     total = 0
-    for layer in past_legacy:
-        for t in layer:
-            total += t.numel() * t.element_size()
+    for k, v in _iter_layers(past):
+        for t in (k, v):
+            if t is not None:
+                total += t.numel() * t.element_size()
     return total
 
 
-def serialize_kv(past_legacy) -> bytes:
+def kv_shape_info(past):
+    """Return (n_layers, kv_heads, head_dim, seq_len) from the first real layer, for reporting."""
+    for k, v in _iter_layers(past):
+        if k is not None and k.dim() == 4:
+            # [batch, kv_heads, seq, head_dim]
+            return {"kv_heads": k.shape[1], "head_dim": k.shape[3], "seq_len": k.shape[2]}
+    return {}
+
+
+def serialize_kv(past) -> bytes:
     """Serialize KV to bytes — the thing a real bridge would put on the wire / shm."""
+    layers = [[k.contiguous().cpu(), v.contiguous().cpu()] for (k, v) in _iter_layers(past)
+              if k is not None and v is not None]
     buf = io.BytesIO()
-    torch.save([[k.contiguous().cpu(), v.contiguous().cpu()] for (k, v) in past_legacy], buf)
+    torch.save(layers, buf)
     return buf.getvalue()
 
 
 def deserialize_kv(blob: bytes, device):
-    """Rehydrate KV from bytes onto the target device and wrap as a DynamicCache."""
+    """Rehydrate KV from bytes onto the target device and wrap as a DynamicCache (legacy fallback)."""
     buf = io.BytesIO(blob)
     # weights_only=True: the blob is only tensors; never unpickle arbitrary objects from the wire.
     legacy = torch.load(buf, map_location=device, weights_only=True)
     legacy = tuple((k.to(device), v.to(device)) for (k, v) in legacy)
-    return DynamicCache.from_legacy_cache(legacy)
+    if DynamicCache is not None and hasattr(DynamicCache, "from_legacy_cache"):
+        return DynamicCache.from_legacy_cache(legacy)
+    return legacy
 
 
 # ---------------------------------------------------------------------------
@@ -88,18 +158,16 @@ def deserialize_kv(blob: bytes, device):
 
 @dataclass
 class GenResult:
-    tokens: list[int]
-    text: str
-    prefill_ms: float
-    total_ms: float
+    tokens: list = field(default_factory=list)
+    prefill_ms: float = 0.0
+    transfer_ms: float = 0.0
+    total_ms: float = 0.0
 
 
 @torch.no_grad()
 def _greedy(model, input_ids, past, new_tokens):
-    """Greedy decode `new_tokens` steps starting from `input_ids` with optional `past`. Returns ids."""
-    generated = []
-    cur = input_ids
-    cache = past
+    """Greedy decode `new_tokens` steps starting from `input_ids` with optional `past`."""
+    generated, cur, cache = [], input_ids, past
     for _ in range(new_tokens):
         out = model(cur, past_key_values=cache, use_cache=True)
         cache = out.past_key_values
@@ -109,47 +177,40 @@ def _greedy(model, input_ids, past, new_tokens):
     return generated
 
 
+def _sync(device):
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+
 @torch.no_grad()
 def generate_recompute(model, prefix_ids, query_ids, new_tokens, device):
     """Baseline: the receiver gets prefix+query as text and prefills ALL of it from scratch."""
     full = torch.cat([prefix_ids, query_ids], dim=1)
-    if device == "cuda":
-        torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    out = model(full, use_cache=True)          # <- prefill over prefix+query (the wasted work)
-    if device == "cuda":
-        torch.cuda.synchronize()
-    prefill_ms = (time.perf_counter() - t0) * 1000
-    cache = out.past_key_values
+    _sync(device); t0 = time.perf_counter()
+    out = model(full, use_cache=True)                  # prefill over prefix+query (the wasted work)
+    _sync(device); prefill_ms = (time.perf_counter() - t0) * 1000
     first = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-    rest = _greedy(model, first, cache, new_tokens - 1)
-    toks = [int(first)] + rest
-    if device == "cuda":
-        torch.cuda.synchronize()
-    total_ms = (time.perf_counter() - t0) * 1000
-    return GenResult(toks, "", prefill_ms, total_ms)
+    rest = _greedy(model, first, out.past_key_values, new_tokens - 1) if new_tokens > 1 else []
+    _sync(device); total_ms = (time.perf_counter() - t0) * 1000
+    return GenResult([int(first)] + rest, prefill_ms, 0.0, total_ms)
 
 
 @torch.no_grad()
 def generate_kv_bridge(model, prefix_kv_blob, query_ids, new_tokens, device):
     """KV-bridge: the receiver gets the prefix KV (already computed) + the query text.
-    It prefills ONLY the query, reusing the transferred prefix cache."""
-    if device == "cuda":
-        torch.cuda.synchronize()
+    It prefills ONLY the query, reusing the transferred prefix cache. Transfer (deserialize) time is
+    measured SEPARATELY from prefill, so the compute win and the transfer cost are not conflated."""
+    _sync(device); t_tr = time.perf_counter()
+    cache = deserialize_kv(prefix_kv_blob, device)     # transfer + rehydrate
+    _sync(device); transfer_ms = (time.perf_counter() - t_tr) * 1000
+
     t0 = time.perf_counter()
-    cache = deserialize_kv(prefix_kv_blob, device)        # transfer + rehydrate
-    out = model(query_ids, past_key_values=cache, use_cache=True)   # <- prefill ONLY the query
-    if device == "cuda":
-        torch.cuda.synchronize()
-    prefill_ms = (time.perf_counter() - t0) * 1000
-    cache = out.past_key_values
+    out = model(query_ids, past_key_values=cache, use_cache=True)   # prefill ONLY the query
+    _sync(device); prefill_ms = (time.perf_counter() - t0) * 1000
     first = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-    rest = _greedy(model, first, cache, new_tokens - 1)
-    toks = [int(first)] + rest
-    if device == "cuda":
-        torch.cuda.synchronize()
-    total_ms = (time.perf_counter() - t0) * 1000
-    return GenResult(toks, "", prefill_ms, total_ms)
+    rest = _greedy(model, first, out.past_key_values, new_tokens - 1) if new_tokens > 1 else []
+    _sync(device); total_ms = (time.perf_counter() - t0) * 1000 + transfer_ms
+    return GenResult([int(first)] + rest, prefill_ms, transfer_ms, total_ms)
 
 
 if __name__ == "__main__":
@@ -161,5 +222,6 @@ if __name__ == "__main__":
     blob = serialize_kv(kv)
     r = generate_recompute(model, prefix, query, 8, device)
     b = generate_kv_bridge(model, blob, query, 8, device)
-    print("kv bytes:", kv_byte_size(kv), "| match:", r.tokens == b.tokens)
-    print("recompute prefill ms:", round(r.prefill_ms, 2), "| bridge prefill ms:", round(b.prefill_ms, 2))
+    print("kv bytes:", kv_byte_size(kv), "| shape:", kv_shape_info(kv), "| match:", r.tokens == b.tokens)
+    print("recompute prefill ms:", round(r.prefill_ms, 2),
+          "| bridge prefill ms:", round(b.prefill_ms, 2), "| transfer ms:", round(b.transfer_ms, 2))

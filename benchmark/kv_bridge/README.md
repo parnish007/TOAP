@@ -1,75 +1,114 @@
-# KV-Bridge — real implementation + benchmark
+# KV-Bridge: implementation, experiment plan, and the Rust↔Python boundary
 
-This is the implemented version of TOAP's `KV_BRIDGE` materialization (Rust side: the `KvTransport`
-trait in `toap-context`). Instead of re-sending a shared context as text and making the next agent
-re-prefill it, the bridge transfers the already-computed **key/value cache** so the receiver prefills
-only its short query.
+This directory contains the **real** implementation and benchmark of TOAP's third reference
+materialization, `KV_BRIDGE`. It turns the paper's weakest claim ("KV-bridge is interface-only") into a
+measured result, and makes the architecture honest: KV-bridge is **part of the protocol**, not just a
+benchmark.
 
-## What it actually does (and its one honest constraint)
+## Why KV-bridge is architectural, not a side experiment
 
-It implements the **correct** case: **same model, same tokenizer, prefix reuse**. The shared
-context's KV is computed at absolute positions `0..n`; the query is appended at `n..`, so RoPE /
-absolute positions stay valid. We deliberately do **not** splice a cache baked at different positions
-— that is the failure mode the literature warns about (RoPE offset, cross-context attention loss), and
-pretending it works would be dishonest.
+TOAP's reference primitive (N3) has three materializations: `INLINE` → `CTX_REF` → `KV_BRIDGE`. The
+*policy* for choosing among them lives in the Rust core and is unit-tested:
 
-## Files
+- `crates/toap-context`: the `Materialization` enum, `choose_materialization`,
+  `materialize_with_fallback`, and **`RegistryKvTransport`** — which enforces the **same-model
+  constraint** and holds a `(ctx, model) → handle` registry, with `register` / `evict`.
+- The broker consults `KvTransport::fetch(ctx, model)` to decide whether a bridge is *available*; if
+  not (no runtime, model mismatch, evicted) it **gracefully degrades** to `CTX_REF` / `INLINE`.
 
-- `kv_bridge.py` — extract / serialize / transfer / reuse KV; recompute vs bridge generation.
-- `kv_bench.py` — measures the three things that decide if KV-bridge is worth it:
-  1. **prefill latency** saved (the upside),
-  2. **KV byte size vs text size** (the honest cost — a KV cache is far bigger than the text),
-  3. **output correctness** (greedy tokens must match the recompute baseline — losslessness).
+What requires a GPU model runtime is only the **tensor engine** — producing, sizing, transferring, and
+reusing the actual KV cache. That is this directory (Python / PyTorch / transformers). The split is
+deliberate:
 
-## Run it
+```
+Rust core (policy)                         Python sidecar (tensor engine)
+------------------                         ------------------------------
+choose_materialization                     extract_kv          (produce)
+RegistryKvTransport (same-model gating)    serialize_kv        (transfer)
+materialize_with_fallback                  deserialize_kv      (rehydrate)
+KvTransport::fetch -> handle?              generate_kv_bridge  (reuse: prefill only the query)
+```
 
-### On your RTX 3050 (local, Windows/Linux)
+`RegistryKvTransport.register(ctx, model, handle)` is exactly the call the sidecar makes after
+`extract_kv` succeeds. The benchmark measures whether that handle is worth using.
+
+## The hypothesis under test (falsifiable, and kept honest)
+
+KV reuse is a crowded field (KVComm, CacheGen, vLLM/SGLang prefix caching). We claim **no** novelty in
+KV compression or transport. We test one specific question:
+
+> For the **same model + tokenizer**, with the shared context as a **prefix** (absolute positions
+> preserved — no cross-position splicing), does reusing the transferred prefix KV (a) **skip the
+> prefix's prefill** and (b) stay **token-for-token lossless** vs recompute — and at what **KV byte
+> cost** vs the text it replaces?
+
+Four quantities per (model, prefix-length) cell:
+
+1. **Prefill latency** — recompute (prefix+query) vs bridge (query only). The compute win.
+2. **Transfer cost** — serialize/deserialize time, reported **separately** so it is never hidden.
+3. **KV byte size vs text size** — the honest storage/bandwidth trade-off (KV ≫ text).
+4. **Correctness** — greedy tokens must match recompute **exactly** (the losslessness claim).
+
+If the bridge does not beat recompute, or transfer dominates, the JSON says so.
+
+## Model matrix (Colab T4, 16 GB)
+
+This is a **different axis** from the Claude Haiku/Sonnet/Opus study: that one measured context-
+*reference* token savings; this one measures KV-*reuse* compute savings. We sweep open models spanning
+attention architectures:
+
+| Model | Arch | Why it's in the matrix |
+|---|---|---|
+| `gpt2`, `gpt2-large` | MHA, ctx 1024 | baseline multi-head attention |
+| `EleutherAI/pythia-410m`, `pythia-1.4b` | NeoX + RoPE, ctx 2048 | rotary embeddings, longer context |
+| `Qwen/Qwen2.5-0.5B/1.5B-Instruct` | **GQA**, long ctx | grouped-query attention → much smaller KV |
+| `mistralai/Mistral-7B-Instruct-v0.3` (`--load-in-4bit`) | 7B GQA | does the win hold at 7B scale? |
+
+GQA models matter: they shrink the KV cache dramatically, changing the byte-cost side of the trade-off
+— exactly the cross-architecture result a reviewer wants.
+
+## How to run
+
+**Colab (recommended):** open `kv_bridge_colab.ipynb`, set runtime to **T4 GPU**, **Run all**. It runs
+the matrix with per-model error isolation and writes `kv_bench_all.json`. Send that back.
+
+**Local (RTX 3050, ~8 GB):** smaller models only; 7B needs `--load-in-4bit` and may still OOM.
 
 ```bash
-cd benchmark/kv_bridge
-pip install transformers
-pip install torch --index-url https://download.pytorch.org/whl/cu121   # CUDA 12.x for the 3050
-python kv_bench.py --model gpt2 --prefix-tokens 128 256 512 1024 --new-tokens 32 --repeats 5
-# larger / more realistic:
-python kv_bench.py --model EleutherAI/pythia-410m --prefix-tokens 256 512 1024 2048 --repeats 5
+pip install -r requirements.txt
+python kv_bench.py --model gpt2                        # auto-picks valid lengths < ctx
+python kv_bench.py --model EleutherAI/pythia-410m --prefix-tokens 256 512 1024 2048
+python kv_bench.py --model Qwen/Qwen2.5-0.5B-Instruct  # GQA
 ```
 
-The 3050 has 4 GB VRAM, so stick to small models (`gpt2`, `distilgpt2`, `pythia-160m/410m`). Use fp16
-on CUDA (the script does this automatically).
+## Robustness notes (why earlier Colab runs crashed, and the fixes)
 
-### On Google Colab (free T4, more VRAM)
+- **`None` KV layers / version drift** — modern `transformers` cache objects differ and may carry
+  `None` placeholders. `_iter_layers` normalizes DynamicCache / legacy tuples and skips `None`, so
+  `kv_byte_size` / `serialize_kv` no longer crash.
+- **`2817 > 1024` over-tokenization** — the prefix is built by **tiling token IDs** to an exact length
+  and **clamped to the model context window**, so GPT-2 never sees a 2817-token string.
+- **`torch_dtype` deprecation** — `load()` uses the modern `dtype=` arg (fallback for old versions).
+- **OOM tolerance** — each cell is wrapped; CUDA OOM skips that cell and frees VRAM rather than
+  aborting the sweep.
+- **Transfer vs compute conflation** — deserialize time is now timed separately (`transfer_ms`), not
+  folded into bridge prefill.
 
-Open `kv_bridge_colab.ipynb` (in this folder) and Run All, or paste:
+## Interpreting the result for the paper
 
-```python
-!pip -q install transformers
-!git clone https://github.com/parnish007/TOAP.git
-%cd TOAP/benchmark/kv_bridge
-!python kv_bench.py --model gpt2-large --prefix-tokens 256 512 1024 2048 --new-tokens 32 --repeats 5
-```
+Expected, honest shape (to be confirmed by your run):
+- **Prefill speedup grows with prefix length** and model size (more prefill skipped).
+- **KV/text ratio is large** (often 100–1000×), and **larger for MHA than GQA** — the reason the
+  literature says "re-send text + prefix cache" often wins unless producer and consumer are co-located.
+- **Correctness `match=True`** for prefix-reuse; any `False` is a red flag we must explain, not hide.
 
-A T4 (16 GB) comfortably runs `gpt2-large` / `pythia-1.4b`, where the prefill-skip is more visible.
+The paper will report this as: *KV-bridge delivers a real, token-lossless prefill saving that scales
+with shared-prefix length, but at a KV-byte cost orders of magnitude above the text — so it is justified
+only for co-located, same-model agents with long shared prefixes; otherwise the policy correctly
+degrades to `CTX_REF`.* A defensible, non-overclaimed contribution.
 
 ## Output
 
-Writes `kv_bench_results.json`. **Send that file back** and the real numbers get folded into the
-paper (`paper/main.tex`) and `docs/claims.md`. Nothing is hand-written — if KV-bridge does not beat
-recompute on your hardware, the table will say so.
-
-## How this connects to the Rust protocol
-
-In TOAP proper, `toap-context::materialize_with_fallback` returns `Materialization::KvBridge { ctx,
-model }` only when sender and receiver share a model and a transport handle exists; otherwise it
-degrades to `CtxRef`. A production `KvTransport` implementation is exactly this Python sidecar (the
-model runtime lives in Python/CUDA, not in Rust): the broker hands over a context id + model tag, and
-the sidecar produces/consumes the KV blob measured here. The Rust side owns the **policy and
-fallback**; this sidecar owns the **tensor transport**. That split is intentional and documented in
-the paper's limitations.
-
-## Expected shape of the result (hypothesis, to be confirmed by your run)
-
-- **Latency:** bridge prefill should beat recompute and the gap should *widen* with prefix length
-  (recompute re-does O(prefix) attention; bridge does O(query)).
-- **Cost:** `kv_vs_text_ratio` will be large (often 100x–1000x) — a KV cache is far bigger than the
-  text. This is the reason TOAP gates KV-bridge behind same-model + long-shared-context and otherwise
-  prefers `CtxRef`. The benchmark exists to find where (if ever) the latency win justifies the size.
+`kv_bench_all.json` (Colab matrix) or `kv_bench_results.json` (single local run). Send it back; numbers
+get folded into `paper/main.tex` and `docs/claims.md`. Nothing is hand-written — if KV-bridge loses on
+your hardware, the table will say so.

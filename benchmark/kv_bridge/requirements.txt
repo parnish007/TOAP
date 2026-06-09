@@ -1,4 +1,7 @@
 # KV-bridge benchmark deps. Install torch matching your CUDA (see pytorch.org).
 # RTX 3050 (CUDA 12.x):  pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Colab already has a CUDA torch; just: pip install -U transformers accelerate bitsandbytes
 torch>=2.2
 transformers>=4.44
+accelerate>=0.30      # device_map for larger / 4-bit models
+bitsandbytes>=0.43    # optional: --load-in-4bit for 7B models
