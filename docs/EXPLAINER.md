@@ -32,7 +32,7 @@ shared store and only **IDs** travel:
 
 ```mermaid
 flowchart LR
-    DOC[Document] -->|store once| S[(Context Store<br/>CTX:1)]
+    DOC[Document] -->|store once| S[("Context Store<br/>CTX:1")]
     S -.->|CTX:1| A1[Agent 1]
     S -.->|CTX:1| A2[Agent 2]
     S -.->|CTX:1| A3[Agent 3]
@@ -139,10 +139,10 @@ sequenceDiagram
     participant Ag as Agent
     participant Cl as TOAP Client
     participant Br as Broker
-    Ag->>Cl: send_request(target, payload)
-    Cl->>Br: REQ | msg_id=100 | target | SUM(CTX:1)
-    Br-->>Cl: RES | msg_id=100 | OK(CTX:2)
-    Cl-->>Ag: reply routed back to the right await (by msg_id)
+    Ag->>Cl: send_request target, payload
+    Cl->>Br: REQ msg_id=100 target SUM CTX:1
+    Br-->>Cl: RES msg_id=100 OK CTX:2
+    Cl-->>Ag: reply routed back by msg_id
 ```
 
 | Pros | Cons |
@@ -403,19 +403,20 @@ Task: *summarize a document, then act on the summary.*
 sequenceDiagram
     autonumber
     participant O as Orchestrator
-    participant Br as Broker (security + routing)
+    participant Br as Broker
     participant St as Context Store
-    participant W as Worker agent
-    O->>Br: STORE(doc)
-    Br->>St: put → CTX:1
-    O->>Br: REQ SUM(CTX:1)?max_words=150
-    Note over Br: check identity · ACL · capability · rate · replay<br/>(doc is User-origin → SUM allowed; EXEC would be refused)
+    participant W as Worker
+    O->>Br: STORE doc
+    Br->>St: put as CTX:1
+    O->>Br: REQ SUM CTX:1
+    Note over Br: check identity, ACL, capability, rate, replay
+    Note over Br: doc is User-origin so SUM is allowed; EXEC would be refused
     Br->>W: deliver CTX:1
-    Note over W: materialize CTX:1 (INLINE / CTX_REF / KV), read, summarize
-    W->>Br: OK(CTX:2)
-    Br->>St: put → CTX:2
-    O->>Br: REQ ACT(CTX:2)
-    Note over O,Br: downstream agent gets CTX:2 — NOT the whole transcript
+    Note over W: materialize CTX:1 then read and summarize
+    W->>Br: OK CTX:2
+    Br->>St: put as CTX:2
+    O->>Br: REQ ACT CTX:2
+    Note over O,Br: downstream agent gets CTX:2, not the whole transcript
 ```
 
 ---
