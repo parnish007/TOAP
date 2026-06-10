@@ -162,32 +162,99 @@ bytes, model-input tokens, and prefill compute.
 \section{TOAP Architecture}\label{sec:arch}
 \subsection{System overview}
 TOAP is a layered, broker-mediated protocol (Figure~\ref{fig:arch}). A message travels \emph{down} the
-stack on the way out and \emph{up} the stack on the way in; each layer has a single, narrow
-responsibility. The defining structural choice is that \textbf{agents never communicate directly} ---
-every message is mediated by a broker that owns identity, access control, and routing. This is what
-makes source identity un-spoofable and lets security be enforced in exactly one place.
+stack on the way out and \emph{up} the stack on the way in, and each layer has one narrow job. The
+choice that shapes everything else is that \textbf{agents never talk to each other directly}: every
+message goes through a broker that owns identity, access control, and routing. We made that choice on
+purpose. If an agent could open a socket to another agent, then the ``who sent this'' field would have
+to be either trusted (spoofable) or separately authenticated on every edge of the mesh; routing the
+mesh through one mediator means identity is decided once, at the point of connection, and never has to
+be claimed on the wire again. It also gives security a single place to live (\S\ref{sec:arch:security})
+instead of being re-implemented in every agent. The cost is a central dependency, which we treat as an
+explicit assumption rather than pretend away (\S\ref{sec:disc}).
 
-We describe each layer in turn (\S\ref{sec:arch:agents}--\S\ref{sec:arch:transport}), then the two
-cross-cutting ideas that distinguish TOAP: the two-plane wire format (\S\ref{sec:twoplane}) and the
-reference materialization spectrum (\S\ref{sec:refspec}).
+To make the layers concrete before defining them one by one, it helps to follow a single request all
+the way through. Suppose an orchestrator wants a worker to summarize a document it holds. The document
+is stored once; the request that crosses the wire is a short reference, not the text; the reply comes
+back correlated to the original request; and at no point does the worker learn, or get to assert, who
+the orchestrator is. Figure~\ref{fig:trace} traces exactly that, and the per-layer subsections below
+explain what each step does and why it is built the way it is. After the layers we cover the two ideas
+that are particular to TOAP: the two-plane wire format (\S\ref{sec:twoplane}) and the reference
+materialization spectrum (\S\ref{sec:refspec}).
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  lifeline/.style={very thick, gray!55},
+  head/.style={draw, rounded corners, fill=tgray, minimum width=2.2cm, minimum height=0.6cm, font=\bfseries},
+  msg/.style={-{Stealth[length=2mm]}, thick},
+  note/.style={font=\scriptsize\itshape, gray!60!black}]
+% actors
+\node[head] (O) at (0,0) {orchestrator};
+\node[head] (B) at (5,0) {broker};
+\node[head] (W) at (10,0) {worker};
+\foreach \n in {O,B,W} \draw[lifeline] (\n.south) -- ++(0,-8.6);
+\def\y{-0.8}
+% 1. store
+\draw[msg] ($(O.south)+(0,\y)$) -- node[above,font=\scriptsize]{\ttfamily SET()?data=<doc>} ($(B.south)+(0,\y)$);
+\draw[msg] ($(B.south)+(0,\y-0.7)$) -- node[above,font=\scriptsize]{\ttfamily RES|7|OK(CTX:42)} ($(O.south)+(0,\y-0.7)$);
+\node[note, right] at ($(B.south)+(0,\y-1.15)$) {document now lives once, as CTX:42};
+% 2. request
+\draw[msg] ($(O.south)+(0,\y-1.9)$) -- node[above,font=\scriptsize]{\ttfamily REQ|8|worker|SUM(CTX:42)?max\_words=60} ($(B.south)+(0,\y-1.9)$);
+% broker self-checks
+\node[draw, rounded corners, fill=tred!7, align=left, font=\scriptsize, anchor=north]
+  at ($(B.south)+(0,\y-2.35)$)
+  {identity = orchestrator \emph{(from session)}\\ ACL: worker may read CTX:42? ok\\ capability: SUM on this origin? ok\\ rate / replay? ok};
+\draw[msg] ($(B.south)+(0,\y-4.3)$) -- node[above,font=\scriptsize]{\ttfamily REQ|8|SUM(CTX:42)} ($(W.south)+(0,\y-4.3)$);
+\node[note] at ($(W.south)+(0,\y-4.75)$) {worker GETs CTX:42, summarizes};
+\draw[msg] ($(W.south)+(0,\y-5.4)$) -- node[above,font=\scriptsize]{\ttfamily RES|8|OK(CTX:87)} ($(B.south)+(0,\y-5.4)$);
+% 3. reply correlated by msg_id
+\draw[msg] ($(B.south)+(0,\y-6.1)$) -- node[above,font=\scriptsize]{\ttfamily RES|8|OK(CTX:87)} ($(O.south)+(0,\y-6.1)$);
+\node[note, right] at ($(B.south)+(0,\y-6.5)$) {broker matches msg\_id 8 back to its requester};
+\node[note] at ($(O.south)+(0,\y-7.0)$) {orchestrator GETs CTX:87};
+\end{tikzpicture}
+\caption{One request, traced through the stack. The document is stored once and thereafter referenced
+by id; the inter-agent message carries \texttt{CTX:42}, not the document. The broker stamps the
+sender's identity from its session, runs the four security checks, and routes by target. The worker
+replies to \texttt{msg\_id 8}, and the broker uses that id to return the reply to whoever sent request
+8 --- so the worker never names, and could never forge, the requester.}
+\label{fig:trace}
+\end{figure}
 
 \subsubsection{Agents and the client SDK}\label{sec:arch:agents}
-Agents (LLMs, tools, or rule-based workers) hold no protocol state of their own; they use a thin async
-client SDK that performs the SYN/ACK handshake binding identity to the connection, correlates each
-reply to its request by \texttt{msg\_id} (so concurrent in-flight requests cannot be confused), and
-delivers inbound \emph{events} on a channel separate from inbound \emph{requests}. The agent surface is
-deliberately small: \texttt{set\_context}, \texttt{get\_context}, \texttt{send\_request},
-\texttt{patch}, \texttt{subscribe}.
+Agents (LLMs, tools, or rule-based workers) hold no protocol state of their own. They talk to a thin
+async client SDK whose whole purpose is to keep the protocol out of the agent author's way: it runs the
+SYN/ACK handshake that binds identity at connect time, allocates and tracks \texttt{msg\_id}s so the
+author never manages correlation by hand, and separates the two kinds of inbound traffic an agent
+cares about --- replies to its own requests, and \emph{events} pushed because a context it subscribed to
+changed --- onto different channels so they cannot be confused. We kept the surface deliberately small,
+five calls (\texttt{set\_context}, \texttt{get\_context}, \texttt{send\_request}, \texttt{patch},
+\texttt{subscribe}), because every capability beyond those is something an agent could misuse or get
+wrong; the narrow API is part of the security story, not just ergonomics. In the trace, the
+orchestrator's ``store the doc, then ask for a summary'' is two SDK calls, and the reply-matching in
+step~3 is the SDK resolving \texttt{msg\_id=8} back to the caller that is awaiting it.
 
 \subsubsection{Protocol layer}\label{sec:arch:protocol}
-The protocol layer turns a message into bytes and back, validating grammar on the way in. V1 is a
-text frame \texttt{TYPE|MSG\_ID|TARGET|PAYLOAD} with a function-style payload
-\texttt{OP(args)?k=v\&...}; the function form is used precisely because the earlier colon form
-(\texttt{SUM:CTX:42}) is ambiguous when an argument (\texttt{CTX:42}) itself contains a colon. The
-parser is \emph{strict about protocol structure} (delimiter count, payload grammar, context-reference
-validity) but \emph{never rejects ordinary content} for resembling an attack --- SQL, HTML, code, and
-even ``ignore previous instructions'' are valid data. V2 adds a compact binary control header
-(\S\ref{sec:twoplane}) that round-trips the identical message model.
+This layer turns a message into bytes and back, and validates the grammar on the way in. A V1 frame is
+four pipe-separated fields followed by a function-style payload:
+\begin{quote}\ttfamily
+REQ|8|worker|SUM(CTX:42)?max\_words=60
+\end{quote}
+read as \emph{type} \texttt{REQ}, \emph{msg\_id} \texttt{8}, \emph{target} \texttt{worker}, and a
+\emph{payload} that names an operation \texttt{SUM}, a positional argument \texttt{CTX:42}, and an
+option \texttt{max\_words=60}. Three choices here are deliberate. First, the payload is
+\emph{function-style} rather than colon-delimited: an earlier design wrote \texttt{SUM:CTX:42}, which is
+ambiguous because the argument \texttt{CTX:42} itself contains a colon, so the parser could not tell a
+field separator from data. Parentheses and a \texttt{?opts} suffix remove that ambiguity without
+needing escapes in the common case. Second, we did not use JSON. JSON would wrap every small
+coordination message in quotes, braces, and key names that the LLM ultimately pays for in tokens
+(\S\ref{sec:bytes}), and the wire savings of TOAP come precisely from \emph{not} doing that. Third, the
+parser is strict about \emph{structure} (it checks the delimiter count, the payload grammar, and that a
+\texttt{CTX:N} reference is well-formed) but it never rejects \emph{content} for looking dangerous:
+\texttt{DROP TABLE}, \texttt{<script>}, and ``ignore previous instructions'' are all perfectly legal
+\emph{data} to carry, because deciding what is safe to \emph{do} with content is the security layer's
+job (\S\ref{sec:arch:security}), not the parser's. Trying to blacklist scary-looking strings at parse
+time is both leaky and breaks legitimate payloads, so we don't. V2 keeps this exact message model but
+serializes the routing fields as a compact binary header (\S\ref{sec:twoplane}); the two formats
+round-trip to the same in-memory message, so a deployment can switch transports without touching agents.
 
 \subsubsection{Security filter}\label{sec:arch:security}
 Before routing, every inbound message passes four checks, in order: (i) \emph{identity} --- derived
@@ -224,25 +291,52 @@ content.}
 \end{figure}
 
 \subsubsection{Broker / router}\label{sec:arch:broker}
-The broker binds one \texttt{agent\_id} per connection at SYN, routes \texttt{REQ} to the target agent,
-and correlates the returning \texttt{RES}/\texttt{ERR} to the original requester by \texttt{msg\_id}
---- so a responder addresses its reply to an id, never to a (spoofable) identity, and never learns who
-asked. A \texttt{PATCH} (\texttt{DLT}) to a subscribed context fans out an \texttt{EVT} to every
-subscriber. The broker is, by design, the sole chokepoint; we treat its availability as an explicit
-threat-model assumption (\S\ref{sec:disc}).
+The broker is where routing and identity meet, and two design decisions there carry most of the weight.
+The first is \emph{identity by session}. When an agent connects, it completes a SYN/ACK handshake and
+the broker binds one \texttt{agent\_id} to that connection for its lifetime; from then on, ``who sent
+this'' is read from the connection, not from any field the sender can write. In the trace
+(Figure~\ref{fig:trace}, step~2) the broker stamps \texttt{orchestrator} on the request itself ---
+there is simply no place in the wire frame for a sender to claim otherwise. This is the structural
+reason a compromised agent cannot impersonate another: spoofing would require hijacking the TCP session,
+not just editing a string.
+
+The second is \emph{correlation by \texttt{msg\_id} rather than by reply-to address}. The requester
+chooses an id (8 in the trace); the broker remembers that id $\to$ requester mapping, forwards the
+request to the target, and when a \texttt{RES} or \texttt{ERR} comes back carrying the same id, it
+delivers it to whoever originally sent id 8. The worker therefore replies \emph{to the id}, never to
+``the orchestrator''; it never has to know, and so can never forge, the requester's identity. This also
+makes concurrency safe for free: an agent can have many requests in flight and the broker untangles the
+replies by id, so two overlapping summaries cannot get crossed. The same machinery drives
+subscriptions: a \texttt{PATCH} (a \texttt{DLT} message) to a context fans out an \texttt{EVT} to every
+agent that subscribed to it, which is how collaborative state changes propagate without polling.
+
+Routing everything through one broker is what makes all of this possible, and it is also the system's
+main structural weakness: the broker is a single point of failure and a throughput chokepoint. We state
+that plainly as a threat-model assumption rather than design around it here (\S\ref{sec:disc}); making
+the broker highly available is exactly the distributed-systems work we have not done.
 
 \subsubsection{Shared context store}\label{sec:arch:store}
-Content is stored once under a numeric id and addressed as \texttt{CTX:N}. Each entry carries not just
-bytes but the metadata that makes a reference safe and useful: broker-derived owner, ACL, capability
-provenance, TTL (with lazy and swept garbage collection), a monotonic version with an append-only
-field-level delta log, and a subscriber set. This is what lets a reference be \emph{lossless} (the
-content is recoverable), \emph{secure} (provenance travels with it), and \emph{collaborative}
-(versioned deltas + events). The current backend is in-memory and single-node; durable/distributed
-backends are future work.
+This is where the document in the trace actually lives. Content is written once and addressed by a
+numeric id (\texttt{CTX:42}), and an entry is more than its bytes: it carries the broker-derived owner,
+an ACL, the capability provenance the security layer reads, a TTL with lazy and swept garbage
+collection, a monotonic version with an append-only field-level delta log, and the set of subscribers
+to notify on change. Each piece of that metadata earns a property the bare bytes could not give. Storing
+the content (rather than a digest of it) is what makes a reference \emph{lossless} --- the worker that
+resolves \texttt{CTX:42} sees the original document, so nothing is silently dropped, which is the whole
+point established in \S\ref{sec:lossless}. Carrying provenance \emph{with} the entry is what lets the
+security check travel with the reference instead of being re-derived at each hop. And the version plus
+delta log is what makes a context safe to \emph{edit} collaboratively: a \texttt{PATCH} appends a
+versioned delta and wakes subscribers, rather than two agents clobbering each other's writes. The
+backend today is in-memory and single-node, which is enough to demonstrate all of this but not to
+survive a restart or scale across machines; a durable, distributed store is future work
+(\S\ref{sec:future}), and is the honest precondition for the systematization argument.
 
 \subsubsection{Transport}\label{sec:arch:transport}
-The lowest layer frames messages as length-prefixed records over TCP (Tokio). WebSocket and gRPC
-transports are planned; nothing above the transport layer depends on the choice.
+The bottom layer just moves bytes: length-prefixed records over TCP (Tokio), where the prefix tells the
+reader how many bytes to expect so messages can be reassembled from a stream without a delimiter that
+could collide with payload data. We keep this layer deliberately dumb and free of protocol knowledge,
+so that swapping in WebSocket or gRPC later changes nothing above it. Nothing in the agent, protocol,
+security, or broker layers depends on the transport choice.
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}[font=\small, node distance=3mm,
