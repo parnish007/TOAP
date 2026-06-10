@@ -105,8 +105,7 @@ def main():
 
     for n in lengths:
         try:
-            prefix = kvb.build_prefix(tok, n, device) if hasattr(kvb, "build_prefix") \
-                else build_prefix(tok, n, device)
+            prefix = build_prefix(tok, n, device)
             actual_n = prefix.shape[1]
             text_bytes = len(tok.decode(prefix[0]).encode("utf-8"))
 

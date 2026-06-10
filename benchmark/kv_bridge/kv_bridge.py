@@ -123,13 +123,15 @@ def extract_kv(model, prefix_ids):
     return out.past_key_values
 
 
-def _make_cache_on_device(layers, device):
-    """Build a forward-compatible cache from (k, v) tensors already on `device`."""
+def _build_cache(layers):
+    """Build a forward-compatible cache from a list of (key, value) tensors (already on the right
+    device). Works on transformers 4.x (DynamicCache.update / from_legacy_cache) and 5.x; falls back
+    to a bare tuple on very old versions."""
     if DynamicCache is not None:
         try:
             cache = DynamicCache()
             for i, (k, v) in enumerate(layers):
-                cache.update(k, v, i)
+                cache.update(k, v, i)            # public update API, 4.x and 5.x
             return cache
         except Exception:
             pass
@@ -148,9 +150,11 @@ def resident_cache_factory(past, device):
     pure COMPUTE win of skipping the prefix prefill (the co-located / shared-broker case)."""
     base = [(k.detach().contiguous(), v.detach().contiguous()) for (k, v) in _iter_layers(past)
             if k is not None and v is not None]
+    if not base:
+        raise RuntimeError("resident_cache_factory: no KV layers extracted from cache")
 
     def make():
-        return _make_cache_on_device([(k.clone(), v.clone()) for (k, v) in base], device)
+        return _build_cache([(k.clone(), v.clone()) for (k, v) in base])
     return make
 
 
@@ -182,36 +186,13 @@ def serialize_kv(past) -> bytes:
     return buf.getvalue()
 
 
-def _make_cache_from_layers(layers, device):
-    """Build a cache object the model's forward pass accepts, across transformers versions.
-
-    layers: list of [key, value] tensors (one per decoder layer), already on CPU.
-    Strategy that works on 4.x AND 5.x: create an empty DynamicCache and populate it with
-    ``cache.update(k, v, layer_idx)`` — the public API used during generation. Falls back to
-    ``from_legacy_cache`` (4.x) and finally to a bare tuple (very old)."""
-    layers = [(k.to(device), v.to(device)) for (k, v) in layers]
-    if DynamicCache is not None:
-        try:
-            cache = DynamicCache()
-            for i, (k, v) in enumerate(layers):
-                cache.update(k, v, i)            # public update API (4.x and 5.x)
-            return cache
-        except Exception:
-            pass
-        if hasattr(DynamicCache, "from_legacy_cache"):
-            try:
-                return DynamicCache.from_legacy_cache(tuple(layers))
-            except Exception:
-                pass
-    return tuple(layers)
-
-
 def deserialize_kv(blob: bytes, device):
     """Rehydrate KV from bytes onto the target device as a forward-pass-compatible cache."""
     buf = io.BytesIO(blob)
     # weights_only=True: the blob is only tensors; never unpickle arbitrary objects from the wire.
     layers = torch.load(buf, map_location="cpu", weights_only=True)
-    return _make_cache_from_layers(layers, device)
+    layers = [(k.to(device), v.to(device)) for (k, v) in layers]
+    return _build_cache(layers)
 
 
 # ---------------------------------------------------------------------------
@@ -248,18 +229,27 @@ def _cache_len(cache) -> int:
 def _forward_at(model, input_ids, cache, device):
     """Forward `input_ids` on top of `cache`, placing them at the correct ABSOLUTE positions.
 
-    Passing explicit cache_position + a full attention_mask keeps RoPE/abs-positions valid when the
-    query is appended after a transferred prefix — this is what makes KV-bridge token-lossless. Falls
-    back to a plain call on versions that infer position automatically."""
+    We pass an explicit cache_position (absolute indices past_len..past_len+seq) so RoPE / absolute
+    positions stay valid when the query is appended after a transferred prefix — this is what makes
+    KV-bridge token-lossless. We also pass a full all-ones attention_mask covering prefix+query so
+    masking is consistent with a from-scratch prefill (every prefix token is attendable), which is what
+    keeps outputs identical to recompute even for sliding-window / GQA models. Both kwargs degrade
+    gracefully on versions that reject them."""
     past_len = _cache_len(cache)
     seq = input_ids.shape[1]
-    try:
-        cache_position = torch.arange(past_len, past_len + seq, device=device)
-        attn = torch.ones((input_ids.shape[0], past_len + seq), dtype=torch.long, device=device)
-        return model(input_ids, past_key_values=cache, use_cache=True,
-                     cache_position=cache_position, attention_mask=attn)
-    except TypeError:
-        return model(input_ids, past_key_values=cache, use_cache=True)
+    bsz = input_ids.shape[0]
+    attn = torch.ones((bsz, past_len + seq), dtype=torch.long, device=device)
+    # try with both explicit position + mask; fall back progressively for older/newer signatures
+    for kwargs in (
+        dict(cache_position=torch.arange(past_len, past_len + seq, device=device), attention_mask=attn),
+        dict(attention_mask=attn),
+        dict(),
+    ):
+        try:
+            return model(input_ids, past_key_values=cache, use_cache=True, **kwargs)
+        except TypeError:
+            continue
+    return model(input_ids, past_key_values=cache, use_cache=True)
 
 
 @torch.no_grad()
@@ -330,13 +320,16 @@ def measure_transfer(prefix_kv_blob, device, warmup=2, iters=8):
 
 @torch.no_grad()
 def check_lossless(model, prefix_ids, query_ids, prefix_kv_blob, device, new_tokens=8):
-    """Greedy-decode new_tokens via recompute vs bridge; return (match: bool, recompute_tokens)."""
+    """Greedy-decode new_tokens via recompute vs bridge; return (match: bool, recompute_tokens).
+
+    Both paths decode through _forward_at so masking/position handling is identical — the only
+    difference is whether the prefix KV was recomputed (baseline) or transferred (bridge)."""
     full = torch.cat([prefix_ids, query_ids], dim=1)
-    out = model(full, use_cache=True)
+    out = _forward_at(model, full, None, device)         # recompute: no prior cache
     f = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     rec = [int(f)] + (_greedy(model, f, out.past_key_values, new_tokens - 1, device) if new_tokens > 1 else [])
     cache = deserialize_kv(prefix_kv_blob, device)
-    ob = _forward_at(model, query_ids, cache, device)
+    ob = _forward_at(model, query_ids, cache, device)    # bridge: reuse transferred prefix KV
     fb = ob.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     bri = [int(fb)] + (_greedy(model, fb, ob.past_key_values, new_tokens - 1, device) if new_tokens > 1 else [])
     return rec == bri, rec
@@ -376,14 +369,22 @@ def generate_kv_bridge(model, prefix_kv_blob, query_ids, new_tokens, device):
 
 
 if __name__ == "__main__":
-    # tiny self-check on CPU with the smallest model
+    # CPU self-check on the smallest model — exercises every public primitive the benchmark uses.
     tok, model, device = load("sshleifer/tiny-gpt2", device="cpu")
     prefix = tok("The capital of France is Paris. " * 5, return_tensors="pt").input_ids.to(device)
     query = tok(" Question: what is the capital?", return_tensors="pt").input_ids.to(device)
+
     kv = extract_kv(model, prefix)
     blob = serialize_kv(kv)
-    r = generate_recompute(model, prefix, query, 8, device)
-    b = generate_kv_bridge(model, blob, query, 8, device)
-    print("kv bytes:", kv_byte_size(kv), "| shape:", kv_shape_info(kv), "| match:", r.tokens == b.tokens)
-    print("recompute prefill ms:", round(r.prefill_ms, 2),
-          "| bridge prefill ms:", round(b.prefill_ms, 2), "| transfer ms:", round(b.transfer_ms, 2))
+    factory = resident_cache_factory(kv, device)
+
+    match, _ = check_lossless(model, prefix, query, blob, device, new_tokens=8)
+    rec_med, *_ = measure_prefill_recompute(model, prefix, query, device, warmup=1, iters=3)
+    res_med, *_ = measure_prefill_bridge_resident(model, factory, query, device, warmup=1, iters=3)
+    xf_med, *_ = measure_transfer(blob, device, warmup=1, iters=3)
+
+    print("kv bytes:", kv_byte_size(kv), "| shape:", kv_shape_info(kv), "| lossless match:", match)
+    print(f"recompute_ms={rec_med:.3f}  resident_ms={res_med:.3f}  transfer_ms={xf_med:.3f}")
+    print(f"speedup_resident={rec_med/res_med:.2f}x  (CPU numbers are illustrative; use a GPU for real)")
+    assert match, "SELF-CHECK FAILED: KV-bridge not token-lossless on tiny-gpt2"
+    print("self-check OK")

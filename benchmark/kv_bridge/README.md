@@ -42,14 +42,20 @@ KV compression or transport. We test one specific question:
 > prefix's prefill** and (b) stay **token-for-token lossless** vs recompute — and at what **KV byte
 > cost** vs the text it replaces?
 
-Four quantities per (model, prefix-length) cell:
+Quantities per (model, prefix-length) cell, all from **warmed-up CUDA-event timing of prefill only**
+(decode excluded; warmup kills the first-call autotune artifact that fakes a <1× slowdown):
 
-1. **Prefill latency** — recompute (prefix+query) vs bridge (query only). The compute win.
-2. **Transfer cost** — serialize/deserialize time, reported **separately** so it is never hidden.
-3. **KV byte size vs text size** — the honest storage/bandwidth trade-off (KV ≫ text).
-4. **Correctness** — greedy tokens must match recompute **exactly** (the losslessness claim).
+1. **`speedup_resident`** — `recompute_prefill / query-prefill-on-resident-KV`. The KV is already on the
+   GPU (co-located / shared-broker / NVLink case) — this is the **pure compute win**, the headline.
+2. **`speedup_crossnode`** — `recompute_prefill / (query-prefill + KV deserialize)`. Includes the
+   **transfer tax** — the honest number when producer and consumer are on different machines.
+3. **`kv_vs_text_ratio`** — KV bytes ÷ text bytes (KV ≫ text; larger for MHA than GQA).
+4. **`outputs_match`** — greedy tokens must match recompute **exactly** (the losslessness claim).
 
-If the bridge does not beat recompute, or transfer dominates, the JSON says so.
+Each timing reports median + std over N iterations. If the bridge does not beat recompute, or transfer
+dominates, the JSON says so. The two speedups are the whole argument: KV-bridge wins big co-located,
+but the transfer cost is why TOAP gates it behind same-model + co-location and otherwise falls back to
+`CTX_REF`.
 
 ## Model matrix (Colab T4, 16 GB)
 
