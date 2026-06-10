@@ -18,9 +18,9 @@
 \newcommand{\callout}[1]{\par\vspace{2mm}\noindent\fcolorbox{black!30}{tbox}{%
 \begin{minipage}{0.97\linewidth}\small #1\end{minipage}}\vspace{2mm}\par}
 
-\title{\textbf{TOAP: A Reference-Minimized Protocol for Inter-Agent Messaging}\\[1mm]
-\textbf{\large When Context Sharing Should Be a Reference, a Summary, or a KV Cache ---}\\
-\textbf{\large an Honest, Measured Account}}
+\title{\textbf{Reference, Summary, or KV Cache?}\\[1mm]
+\textbf{\large Measuring How Multi-Agent Systems Should Share Context}\\[2mm]
+\normalsize\textnormal{with TOAP, a reference-minimized protocol and its open implementation}}
 \author{Trilochan Sharma \\ Independent Researcher \\ \texttt{parnishklpo@gmail.com}}
 \date{June 2026}
 
@@ -47,16 +47,17 @@ not a token win over good prompt engineering. What it offers instead is lossless
 re-expanded; a summary cannot) and security (provenance travels with the reference), and we now
 \emph{measure} both rather than assert them. On a pre-registered task where a faithful summary
 necessarily drops detail, a downstream responder scores \textbf{8/8 with the reference vs.\ 6/8 with the
-summary}, failing exactly on the dropped facts. Against an adversarial corpus, the capability lattice
-blocks \textbf{13/13} attempts to drive a side-effecting operation from untrusted content with
-\textbf{zero} false positives on benign read/analysis traffic --- a structural guarantee that does not
-depend on how an injection is phrased. (An accuracy regression we first saw on Haiku at $n{=}1$ did not
-reproduce at $n{=}5$ and is retracted --- a small lesson in why single-call agent measurements are
-unsafe.) On the compute side, we implement and measure the third materialization, a same-model KV-cache
-transfer, across seven open models: reusing a transferred prefix cache is a real, near-lossless prefill
-speedup (35/36 cells byte-identical; up to $\sim$180$\times$ at long context), but the cache is
-thousands of times larger than the text, so it only pays off when agents are co-located or use
-grouped-query attention --- which grounds TOAP's gating policy in measurement rather than assumption.
+summary}, failing exactly on the dropped facts. Against an adversarial corpus of 40 attacks across
+nine categories, the capability lattice blocks \textbf{all 40} attempts to drive a side-effecting
+operation from untrusted content with \textbf{zero} false positives on 14 benign read/analysis
+requests. That guarantee does not depend on how an injection is phrased, and we show its two documented
+blind spots as well. (An accuracy regression we first saw on Haiku at $n{=}1$ did not reproduce at
+$n{=}5$ and is retracted, a small lesson in why single-call agent measurements are unsafe.) On the
+compute side, we implement and measure the third materialization, a same-model KV-cache transfer,
+across seven open models: reusing a transferred prefix cache is a real, near-lossless prefill speedup
+(35/36 cells byte-identical; up to $\sim$180$\times$ at long context), but the cache is thousands of
+times larger than the text, so it only pays off when agents are co-located or use grouped-query
+attention. That last result grounds TOAP's gating policy in measurement rather than assumption.
 Throughout we separate wire bytes from model tokens, and show symbolic ``opcodes'' save 50\% of bytes
 but only 0--17\% of tokens. We describe the protocol architecture (a two-plane wire format; a
 reference-materialization spectrum) and a Rust reference implementation. \emph{Threats to validity are
@@ -415,7 +416,7 @@ summary discards information irreversibly. This is not hypothetical: when the di
 one a downstream step needs, the summary arm fails and the reference arm does not (8/8 vs.\ 6/8,
 \S\ref{sec:lossless}). \textbf{(ii) Security travels with the reference.} Provenance and broker-derived
 identity are enforced structurally, so untrusted content cannot be laundered into a side-effecting
-operation regardless of how the injection is phrased --- 13/13 attempts blocked at no cost to benign
+operation regardless of how the injection is phrased --- 40/40 attempts blocked at no cost to benign
 traffic (\S\ref{sec:security-eval}); a summarizing prompt template offers none of this. A third
 intended property, \emph{systematization} across heterogeneous agents, is a design goal of the protocol
 but is not something this paper measures (the implementation is single-language and single-node); we
@@ -545,22 +546,50 @@ all eight. Pre-registered; deterministic grading; \texttt{benchmark/ab\_study/lo
 \end{table}
 
 \subsection{Does the capability lattice actually stop anything?}\label{sec:security-eval}
-\S\ref{sec:arch:security:cap} describes the capability lattice; the fair question is whether it blocks
-real attacks or is merely plausible infrastructure. We evaluate it directly. The threat is a prompt
+\S\ref{sec:arch:security:cap} describes the lattice; the fair question is whether it stops real attacks
+or is just plausible-looking infrastructure. We threw a corpus at it. The threat we model is a prompt
 injection that tries to make untrusted content (User- or External-origin) drive a side-effecting
-operation: exfiltrate by email, execute a shell command, issue a payment, delete a context. We fire a
-corpus of 13 such attempts and 8 benign requests (read, summarize, classify, and a legitimate
-transform on external content) at the broker's check, which maps the requested opcode to a capability
-and refuses anything the content's provenance does not permit. The lattice \textbf{blocks all 13
-attacks and allows all 8 benign requests} --- a 100\% block rate at a 0\% false-positive rate. The
-result is exact rather than probabilistic for a reason that matters: the decision is made on
-(origin, capability), not on the text, so paraphrasing, obfuscating, or encoding the injection cannot
-change it. This is a structural containment guarantee, not a classifier that can be talked around. Its
-scope is equally clear: it governs what untrusted \emph{content} may be used \emph{for}, and assumes a
-correct provenance tag at ingress; it is not a defense against a compromised broker or a mislabeled
-origin, and it does nothing about injections that stay within an allowed capability (e.g.\ steering a
-summary). The artifact is a committed test (\texttt{crates/toap-context/tests/capability\_redteam.rs})
-so the corpus and outcome are reproducible.
+operation, and we cover nine flavours of it: straightforward exfiltration, code and shell execution,
+payments, deletes, privilege escalation through writes, the same restricted call buried at the end of a
+multi-hop chain, a payload assembled across several context updates, novel or mis-cased opcodes hoping
+to slip past the dispatcher, and the same attacks dressed up in base64, Unicode homoglyphs, or
+zero-width characters. That is 40 attacks in total, alongside 14 benign requests (reads, summaries,
+classifications, and the legitimate transforms that External content is allowed). Each is sent through
+the same broker check, which maps the requested opcode to a capability and refuses anything the
+content's provenance does not permit. The lattice \textbf{blocked all 40 attacks and allowed all 14
+benign requests} --- a 100\% block rate at a 0\% false-positive rate, the same in every category
+(Table~\ref{tab:redteam}).
+
+We are not claiming a clever detector here, and the chaining and obfuscation cases are in the corpus to
+make that explicit: the decision is taken on (origin, capability), never on the text, so where the
+injection sits in a chain or how it is encoded simply does not enter the computation. That is the
+strength and also the boundary. A capability gate governs what untrusted content may be \emph{used
+for}; it says nothing about attacks that live elsewhere. We include two such cases and confirm the
+lattice does \emph{not} stop them, by design: an injection that stays inside an allowed capability (it
+only asks for a summary, then steers that summary) sails through, and content whose origin was
+mislabeled \textsc{Internal} at ingress is trusted on that label. Defending those needs output-side
+checks and a trustworthy tagging boundary respectively --- separate components we assume rather than
+evaluate. The whole corpus, the per-category counts, and the two boundary cases are a committed test
+(\texttt{crates/toap-context/tests/capability\_redteam.rs}), so the result regenerates from a clean
+checkout.
+
+\begin{table}[h]\centering\footnotesize
+\begin{tabular}{lc@{\hskip 2em}lc}
+\toprule
+Attack category & Blocked & Attack category & Blocked \\
+\midrule
+Exfiltration (email)      & 5/5 & Multi-hop chain        & 4/4 \\
+Execution (exec/shell)    & 6/6 & Split payload          & 3/3 \\
+Financial (pay)           & 4/4 & Stepping-stone opcode  & 4/4 \\
+Destructive (delete)      & 4/4 & Obfuscation/encoding   & 5/5 \\
+Escalation (write/xform)  & 5/5 & \textbf{All / benign}  & \textbf{40/40 \ \ 0 FP/14} \\
+\bottomrule
+\end{tabular}
+\caption{Capability-lattice red team. 40 injection attempts across nine categories, all blocked; 14
+benign read/analysis requests, none blocked. Two documented boundary cases (within-capability steering;
+mislabeled origin) are \emph{not} blocked, by design.}
+\label{tab:redteam}
+\end{table}
 
 \subsection{KV-bridge: prefill reuse for same-model agents}\label{sec:kv-results}
 The third materialization, \textsc{KV\_Bridge}, transfers a shared context's key/value cache so the
@@ -623,50 +652,73 @@ uses grouped-query attention --- which is precisely the condition \texttt{Regist
 falling back to \textsc{Ctx\_Ref} otherwise. The measurement grounds the policy rather than assuming it.
 
 \section{Discussion and Limitations}\label{sec:disc}
-The honest synthesis: \emph{naive transcript accumulation is wasteful; both summarization and
-referencing fix it at equal accuracy here; summarization is cheaper on tokens but lossy; referencing is
-slightly costlier but lossless, secure, and systematic} (\S\ref{sec:why}). The retracted Haiku
-regression is itself a result: \textbf{single-call agent measurements are unsafe}, and apparent
-small-model effects must be checked with replication.
+Pulling the threads together: transcript accumulation is wasteful, and both summarizing and referencing
+fix it without hurting accuracy on the tasks we tried. Summarizing is cheaper in tokens but throws
+information away, which costs accuracy the moment a later step needs a discarded fact; referencing
+costs a little more but keeps the information and carries provenance with it. KV transfer is a separate
+lever again, paying off in compute when the shared prefix is long and the model is friendly to it. None
+of these dominates, which is the whole point. We would also flag the retracted Haiku regression as a
+result in its own right: it looked real at $n{=}1$ and evaporated at $n{=}5$, a reminder that a single
+agent generation is not a measurement.
 
-We state threats plainly and treat them as first-class; each of our claims is demonstrated in a
-controlled setting, and in several cases we have not yet shown that it holds in the regime where it
-would matter most. We say where that is true rather than imply otherwise.
+We would rather name the soft spots than have a reviewer find them. The biggest is breadth of models.
+The token and losslessness experiments run on Claude Haiku, Sonnet, and Opus, which share a tokenizer
+and an architecture family, so strictly speaking this is one family at three scales, not a cross-vendor
+study, and the token counts in particular are tokenizer-specific. The KV-bridge experiment does span
+seven open models and three attention designs, but that breadth lives on the compute side; the token
+and accuracy story does not yet have it. Closing that gap is the single most valuable next run, and we
+ship a notebook (\S\ref{sec:lossless}) that re-runs the losslessness test verbatim on an open model so
+it is a button-press rather than a rewrite.
 
-\textbf{Token study: one model family, one tokenizer.} The token and accuracy numbers come from Claude
-Haiku/Sonnet/Opus, which share a tokenizer and architecture family; token counts are tokenizer-specific
-and the prompt-following behaviour may be Claude-specific. This is a single-family study at three
-scales, not a cross-vendor one. The KV-bridge study (\S\ref{sec:kv-results}) does span seven open
-models and three attention designs, but the \emph{token} comparison does not, and a Llama/GPT/Gemini
-replication of the token and losslessness experiments remains the most important piece of missing
-breadth. \textbf{Small $n$, few scenarios.} The token comparison is $n{=}33$ on one scenario with a
-fixed upstream; with $n{=}3$ per Sonnet/Opus cell the per-cell ratios are indicative, not tight
-estimates. The losslessness result (\S\ref{sec:lossless}) is a single pre-registered scenario with
-$n{=}3$ per arm: it shows the mechanism --- a faithful summary drops facts and a downstream task that
-needs one then fails --- but, by construction, it cannot tell us \emph{how often} real tasks hit that
-case. Generalising it needs several document types (e.g.\ contracts, specifications) at larger $n$, and
-we frame it as existence, not frequency. \textbf{Security corpus is small and tests the guaranteed
-part.} The 13-attack red team (\S\ref{sec:security-eval}) confirms the lattice blocks side-effecting
-operations on untrusted content, but the block rate is structural (decided on origin and capability,
-not text), so what it really verifies is that the check is implemented and that the categories we
-thought of are covered. It does \emph{not} probe the surface that is \emph{not} guaranteed by
-construction: a mislabeled origin at ingress, a compromised broker, or an injection that stays within
-an allowed capability (e.g.\ steering a summary). Those are real and we do not evaluate them here.
-\textbf{KV-bridge scope.} The speedups are microbenchmarks of one prefill step on a single GPU (T4)
-against full recompute, not against provider prefix-caching (the production alternative, which we do not
-claim to beat); ``transfer'' is local serialize/deserialize, not an RDMA hop; and we restrict to
-same-model prefix reuse. The one float16 divergence in 36 cells means ``lossless'' here is
-token-identical in practice, not bit-exact in theory. \textbf{Implementation is single-node.} The
-broker is one in-memory process. The protocol's \emph{systematization} argument --- uniform behaviour
-across many heterogeneous agents --- only bites at scale, and that is precisely the regime we have not
-built; durable/distributed storage, message signing, and cross-reconnect replay nonces are future work.
-We therefore present systematization as a design goal, not a measured result.
+Sample size and scenario diversity are the next concern. The token comparison is one scenario with a
+fixed upstream and only three samples per Sonnet/Opus cell, so those per-cell ratios are indicative
+rather than tight. The losslessness experiment is a single pre-registered document; it cleanly shows
+that a faithful summary drops facts and that a task needing one then fails, but it cannot tell us how
+\emph{often} real workloads land in that situation. We are careful to claim existence, not frequency.
+Establishing frequency would mean running the same protocol over several document types --- a contract
+with exact obligations, a spec with exact thresholds, narrative text --- at larger $n$, and reporting
+whichever way it comes out.
 
-\textbf{On novelty.} We claim none for the mechanism. The contribution is the controlled, bias-free,
-reproducible accounting --- a summarizing baseline beats referencing on tokens, lossiness costs
-downstream accuracy when a dropped fact is needed, the capability lattice contains the attacks it is
-designed to, and KV transfer's compute win and size cost mapped across seven models --- together with
-an architecture that makes the byte/token planes and the materialization choice explicit.
+The security result is genuine but deliberately modest in what it proves. Forty injection attempts
+across nine categories are all blocked with no false positives, and the chaining and obfuscation cases
+are there to show that the decision ignores the text entirely. But that same property means the corpus
+mostly confirms the lattice is implemented as specified; the interesting attacks live where the lattice
+makes no promise, and we say so by including two boundary cases it does not stop --- an injection that
+stays inside an allowed capability, and content mislabeled at ingress. A real security evaluation would
+push on exactly those: the tagging boundary, a compromised broker, and output-side manipulation that a
+capability gate cannot see.
+
+Two scope notes finish the list. The KV-bridge numbers are microbenchmarks of a single prefill step on
+one T4, measured against full recompute rather than against provider prefix-caching, which is the
+comparison a deployment would actually care about and which we do not claim to beat; the ``transfer''
+is a local serialize/deserialize rather than a network hop, and the one float16 divergence in
+thirty-six cells means ``lossless'' here is token-identical in practice, not bit-exact in theory. And
+the implementation is a single in-memory broker process. That matters for our third argument:
+systematization only really shows up at scale, across many machines and restarts, and that is precisely
+the setting we have not built. We therefore present systematization as a design goal rather than a
+measured result, and treat a persistent, distributed store as future work, not as something this paper
+has demonstrated.
+
+\section{Future Work}\label{sec:future}
+Three things would move this from a careful pilot to a result that travels. First, the cross-vendor
+replication: run the token and losslessness experiments on at least one non-Claude model
+(Llama-3.1-8B or Qwen2.5-7B are enough), since even a single open-model run removes the
+single-family caveat that currently shadows half the paper. Second, breadth on the two thin
+experiments: several document types for losslessness at $n\!\ge\!10$ each, and a security corpus that
+attacks the parts the lattice does not guarantee --- ingress mislabeling and within-capability steering
+--- rather than the part it does. Third, the engineering that the systematization claim is really
+about: a durable, distributed context store (a persistent backing store with restart survival is the
+honest first step), message signing and cross-reconnect replay nonces, and a head-to-head against
+provider prefix-caching for the KV path. None of these change the design; they are about earning the
+claims the design implies.
+
+\noindent\textbf{On novelty.} We claim none for the mechanism --- shared stores, references, and KV
+reuse all predate us. The contribution is the measured, reproducible accounting that ties them
+together: a summarizer beats referencing on tokens, a summary's lossiness costs accuracy when a dropped
+fact is needed, the capability lattice contains the attacks it was built for and openly not the ones it
+was not, and KV transfer's compute win and storage cost are mapped across seven models --- with an
+architecture that makes the byte/token split and the materialization choice explicit rather than
+implicit.
 
 \section{Conclusion}
 Two measurements, on two cost planes, point the same way. On tokens, reference-minimization removes the

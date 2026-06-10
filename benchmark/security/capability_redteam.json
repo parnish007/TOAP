@@ -1,12 +1,24 @@
 {
-  "attacks": 13,
-  "benign": 8,
-  "attacks_blocked": 13,
+  "attacks": 40,
+  "benign": 14,
+  "attacks_blocked": 40,
   "attacks_missed": 0,
-  "benign_allowed": 8,
+  "benign_allowed": 14,
   "benign_blocked": 0,
   "block_rate": 1.0000,
   "false_positive_rate": 0.0000,
+  "by_category_blocked": {
+    "destructive": "4/4",
+    "escalation": "5/5",
+    "execution": "6/6",
+    "exfiltration": "5/5",
+    "financial": "4/4",
+    "multi_hop_chain": "4/4",
+    "obfuscation": "5/5",
+    "split_payload": "3/3",
+    "stepping_stone": "4/4"
+  },
+  "documented_boundary_cases_NOT_blocked": 2,
   "missed": [],
   "false_positives": []
 }
