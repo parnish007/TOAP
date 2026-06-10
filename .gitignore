@@ -89,3 +89,6 @@ paper/*.out
 paper/*.toc
 paper/*.fls
 paper/*.fdb_latexmk
+
+# private research notes (not for publication)
+research-cot-synthesis.md
