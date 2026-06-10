@@ -4,10 +4,12 @@ This file is the source of truth for project claims. If a number is not listed u
 
 ## Current Status
 
-v1.0 (Rust). Implemented and tested: protocol core, context store (ACL/TTL/deltas), security
-(rate-limit/replay/taint), broker (sessions/routing/subscriptions), client SDK, demo agents, MCP
-frontend, and a token benchmark. **19 automated tests pass.** The first measured benchmark exists
-(below) — but it is a *synthetic simulation with rule-based agents*, not a real-LLM study.
+v1.0 (Rust). Implemented and tested: protocol core (V1 text + V2 binary), context store
+(ACL/capability-lattice/TTL/deltas/subscriptions), security (rate-limit/replay/capability), broker
+(sessions/routing), client SDK, demo agents, MCP frontend, materialization policy + KV-bridge sidecar.
+**28 automated Rust tests pass.** Three benchmark tiers exist (below): a synthetic wire-token harness,
+a real multi-model token study (Claude Haiku/Sonnet/Opus), and a real multi-model KV-bridge compute
+study (7 open models on a T4).
 
 ## Measured Claims
 
@@ -34,6 +36,31 @@ deterministic task gives the same answers. This proves *no accuracy loss from th
   (unchanged once a fetched doc enters a model prompt).
 - Fan-out only wins when the store is co-located/reused; the remote-refetch row shows the weak case.
 - Opcode terseness is a minor win (≤17%); the real win is context-by-ID dedup.
+
+## Measured Claims — KV-bridge (compute plane)
+
+Source: `benchmark/kv_bridge/` (`kv_bridge.py`, `kv_bench.py`, notebook); hardware: **NVIDIA T4**
+(Google Colab); 7 open models × prefix lengths up to 8192; warmed-up CUDA-event timing of **prefill
+only**; raw data: `benchmark/kv_bridge/kv_bench_all.json`; figure: `paper/figures/gen_kv_figure.py`.
+
+| Quantity | Result |
+| --- | --- |
+| Resident prefill speedup (co-located, KV already on GPU) | up to **~181×** (Qwen2.5-0.5B @ 8192 tok); grows with prefix length + model size |
+| Crossover (resident ≥ 1×) | ~256–1024 tokens depending on model; below it, no win |
+| Cross-node speedup (includes KV serialize/transfer) | **>1× for GQA** (Qwen reaches 68×); **<1× for most MHA** at tested lengths |
+| KV cache size vs text it replaces | **2,500–43,000×** larger; far larger for MHA than GQA |
+| Losslessness (byte-identical greedy output) | **35/36 cells**; 1 fp16 one-token divergence (GPT-2 @512), exact in fp32 |
+
+**What it proves:** same-model KV reuse is a real, near-lossless prefill speedup that scales with
+context, but the cache is so much larger than the text that it only pays off co-located or under GQA —
+grounding the `RegistryKvTransport` gating policy (same-model + co-location, else fall back to CTX_REF).
+
+### Stated limitations (KV-bridge)
+- Microbenchmark of one prefill step on a **single GPU (T4)**, vs **full recompute** — NOT vs provider
+  prefix-caching (the real production alternative; we do not claim to beat it).
+- "Transfer" = local serialize/deserialize, not a real RDMA/network hop.
+- Same-model, same-tokenizer, **prefix reuse only** (no cross-position splicing).
+- "Lossless" = token-identical in practice (fp16), not bit-exact in theory.
 
 ### Evidence tiers (read this before citing any number)
 

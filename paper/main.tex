@@ -34,26 +34,29 @@ Code: MIT \quad|\quad Paper: CC\,BY\,4.0
 \end{center}
 
 \begin{abstract}
-Multi-agent LLM pipelines commonly forward a growing transcript --- the source document plus every
-prior agent's output --- into each downstream prompt, so token cost grows with depth. A natural remedy
-is to pass a \emph{reference} to shared content instead of re-sending it. We report a \textbf{preliminary
-pilot} that measures this remedy honestly rather than advocating it. Three findings stand out.
-\textbf{(1)} In a controlled experiment ($n{=}33$ real Claude generations across Haiku/Sonnet/Opus,
-three context strategies, accuracy scored by a \emph{deterministic, model-independent} rubric checker),
-reference-minimization (TOAP) and a competent summarizing orchestrator \emph{both} cut downstream
-tokens at \textbf{full accuracy parity (all 33 samples 4/4)}. \textbf{(2)} Crucially, the
-\emph{summarizing baseline saves more tokens than TOAP} ($\sim$2.5$\times$ vs.\ $\sim$1.9$\times$ vs.\
-the naive baseline): reference-minimization is \emph{not} a token win over good engineering. TOAP's
-actual value is therefore \emph{losslessness} (a reference can be re-expanded; a summary cannot),
-\emph{security} (provenance/identity travel with the reference), and \emph{systematization} at the
-protocol layer. \textbf{(3)} A single-sample accuracy regression we initially observed on Haiku
+Multi-agent LLM pipelines tend to forward a growing transcript, the source document plus every prior
+agent's output, into each downstream prompt; token cost then grows with pipeline depth. An obvious
+remedy is to pass a \emph{reference} to shared content rather than re-send it. This paper measures that
+remedy honestly instead of advocating for it, and the results are more nuanced than the pitch.
+In a controlled experiment ($n{=}33$ real Claude generations across Haiku, Sonnet, and Opus, three
+context strategies, accuracy scored by a deterministic and model-independent rubric checker),
+reference-minimization (TOAP) and a competent summarizing orchestrator \emph{both} cut downstream tokens
+with no accuracy loss: all 33 samples scored 4/4. But the summarizing baseline saves \emph{more} tokens
+than TOAP ($\sim$2.5$\times$ vs.\ $\sim$1.9$\times$ over the naive baseline). So reference-minimization is
+not a token win over good prompt engineering. What it offers instead is losslessness (a reference can be
+re-expanded; a summary cannot), security (provenance and identity travel with the reference), and
+systematization at the protocol layer. \textbf{(3)} A single-sample accuracy regression we initially observed on Haiku
 \textbf{did not reproduce} at $n{=}5$ and is retracted --- a concrete illustration of why $n{=}1$
-agent measurements are unsafe. We also separate wire bytes from model tokens and show symbolic
-``opcodes'' save 50\% of bytes but only 0--17\% of tokens. We describe the protocol architecture (a
-two-plane wire format; a reference-materialization spectrum) and a Rust reference implementation, and
-are explicit throughout about what is \emph{implemented} vs.\ \emph{proposed}. \emph{Threats to
-validity are first-class}: a single model family/tokenizer, a same-family judge as a secondary check
-only, and small $n$. The mechanism is not novel (blackboard systems, A2A artifacts, ADOL); the
+agent measurements are unsafe. \textbf{(4)} On the compute side, we implement and measure the third
+materialization, a same-model KV-cache transfer, on seven open models: reusing a transferred prefix
+cache is a real, near-lossless prefill speedup (35/36 cells byte-identical; up to $\sim$180$\times$ at
+long context) but the cache is thousands of times larger than the text, so it pays off only when agents
+are co-located or use grouped-query attention --- grounding TOAP's gating policy in measurement rather
+than assumption. We also separate wire bytes from model tokens and show symbolic ``opcodes'' save 50\%
+of bytes but only 0--17\% of tokens. We describe the protocol architecture (a two-plane wire format; a
+reference-materialization spectrum) and a Rust reference implementation. \emph{Threats to validity are
+first-class}: a single model family/tokenizer for the token study, a same-family judge as a secondary
+check only, and small $n$. The mechanism is not novel (blackboard systems, A2A artifacts, ADOL); the
 contribution is the honest, reproducible accounting.
 \end{abstract}
 
@@ -63,12 +66,14 @@ each subsequent agent's prompt. Because LLM cost is paid per prompt token, redun
 dominates coordination cost. TOAP stores shared content once under an identifier and exchanges
 references, so each agent retrieves only what it needs.
 
-We are deliberately conservative. The mechanism is old (\S\ref{sec:related}); ``$10\times$'' claims
-that count bytes mislead (\S\ref{sec:bytes}); and the question worth answering is not \emph{whether}
-referencing saves tokens but \emph{how it compares to a competently engineered baseline}, and whether
-small models pay an accuracy price. Our central, somewhat humbling, empirical result is that a good
-summarizing orchestrator saves \emph{more} tokens than reference-minimization, at equal accuracy ---
-so TOAP must justify itself on losslessness, security, and systematization, not on raw token savings.
+We try to be conservative about what this buys. The underlying mechanism is old (\S\ref{sec:related}),
+and ``$10\times$'' claims that count bytes rather than tokens are misleading (\S\ref{sec:bytes}). The
+question worth asking is not whether referencing saves tokens, but how it compares to a competently
+engineered baseline, and whether small models pay an accuracy price for it. Our central result is a
+little humbling: a good summarizing orchestrator saves more tokens than reference-minimization at the
+same accuracy. TOAP therefore has to justify itself on losslessness, security, and systematization
+rather than on raw token savings, and most of this paper is about establishing where each of those
+actually matters.
 
 \callout{\textbf{What is measured vs.\ proposed.} The token experiments (\S\ref{sec:bytes},
 \S\ref{sec:results}) use the implemented V1 text protocol and real model generations; the KV-bridge
@@ -86,6 +91,8 @@ signing).}
         a minor lever (\S\ref{sec:bytes}).
   \item A controlled, $n{=}33$, bias-free-scored comparison of naive / summarizing / reference
         strategies, with a retracted single-sample regression (\S\ref{sec:results}).
+  \item An implemented, seven-model measurement of same-model KV-cache reuse, showing where the
+        compute win justifies the cache-transfer cost (\S\ref{sec:kv-results}).
   \item A direct answer to ``why a protocol rather than a better orchestrator?'' (\S\ref{sec:why}).
 \end{enumerate}
 
@@ -118,14 +125,15 @@ ADOL (IETF draft) & layer above MCP/A2A & JSON \texttt{\$ref} dedup & Yes (conte
 \end{table}
 
 \section{Bytes Are Not Tokens}\label{sec:bytes}
-A common error is to minimize \emph{bytes} and report it as token savings. BPE tokenizers pre-tokenize
-on punctuation before merging, so dense punctuation each costs a whole token. Measured with
-\texttt{tiktoken} (cl100k): \texttt{SUM(CTX:42)?max\_words=150} is 25 bytes / 10 tokens vs.\ the NL
-``Please summarize document 42 in at most 150 words.'' at 50 bytes / 12 tokens --- 50\% fewer bytes but
-only 17\% fewer tokens (Figure~\ref{fig:bytes}); richer payloads save \emph{less}. The design
-consequence: \textbf{opcode terseness is a minor lever}; the real question is whether to transmit the
-\emph{content} at all. We therefore separate three cost planes --- wire bytes, model-input tokens,
-prefill compute --- and measure each independently.
+A common mistake is to minimize \emph{bytes} and report the result as token savings. The two are not
+the same. BPE tokenizers pre-tokenize on punctuation before merging, so a payload dense in punctuation
+spends close to one token per symbol. Measured with \texttt{tiktoken} (cl100k),
+\texttt{SUM(CTX:42)?max\_words=150} is 25 bytes and 10 tokens, while the natural-language ``Please
+summarize document 42 in at most 150 words.'' is 50 bytes and 12 tokens: half the bytes, but only 17\%
+fewer tokens (Figure~\ref{fig:bytes}). Richer payloads save even less. The lesson is that opcode terseness
+is a minor lever, and the question that actually matters is whether to transmit the \emph{content} at
+all. We keep three cost planes separate throughout this paper and measure each on its own terms: wire
+bytes, model-input tokens, and prefill compute.
 
 \begin{figure}[h]\centering
 \includegraphics[width=0.62\textwidth]{figures/fig_bytes_tokens.png}
@@ -422,11 +430,11 @@ seen in an earlier \emph{single-sample} run \textbf{did not reproduce} at $n{=}5
 we attribute it to single-sample noise and/or propagation of a weaker upstream analysis, and retract it.
 
 \textbf{Tokens: the summarizing baseline beats TOAP.} Table~\ref{tab:writer} and
-Figure~\ref{fig:threearm} give total writer tokens. Versus the naive baseline, TOAP reduces tokens by
-\textbf{1.88--1.93$\times$} (mean $\sim$1.91$\times$) while the summarizing baseline reduces them by
-\textbf{2.39--2.62$\times$} (mean $\sim$2.54$\times$), \emph{both at 4/4 accuracy}. Reference-passing is
-therefore \emph{not} the most token-efficient strategy; a competent summarizer is. This is the central,
-honest result.
+Figure~\ref{fig:threearm} give total writer tokens. Against the naive baseline, TOAP cuts tokens by
+1.88--1.93$\times$ (mean $\sim$1.91$\times$); the summarizing baseline cuts them by 2.39--2.62$\times$
+(mean $\sim$2.54$\times$). Both hold 4/4 accuracy. Reference-passing, in other words, is not the most
+token-efficient strategy; a competent summarizer is. We state this plainly because it is the result
+most likely to be glossed over, and because it reframes what the rest of the protocol is for.
 
 \begin{table}[h]\centering\footnotesize
 \begin{tabular}{llcccc}
@@ -470,29 +478,62 @@ protocol, rather than per-hop summarization, is the natural fit --- and where lo
 \subsection{KV-bridge: prefill reuse for same-model agents}\label{sec:kv-results}
 The third materialization, \textsc{KV\_Bridge}, transfers a shared context's key/value cache so the
 receiver prefills only its query suffix. We evaluate the same-model, same-tokenizer prefix-reuse case
-(absolute positions preserved; no cross-position splicing) across an open-model matrix spanning
-multi-head attention (GPT-2 family), rotary/NeoX (Pythia), and grouped-query attention
-(Qwen2.5, Mistral-7B in 4-bit) on an NVIDIA T4. Timing is warmed-up, CUDA-event-timed, and isolates
-\emph{prefill} (decode excluded). We report two speedups per cell: \emph{resident}
-($=$ recompute prefill $/$ query-prefill on an already-resident KV --- the co-located / shared-broker
-case, the pure compute win) and \emph{cross-node} (additionally charging KV deserialize/transfer).
-Correctness is exact greedy-token match vs.\ recompute.
+(absolute positions preserved; no cross-position splicing) on an NVIDIA T4 across seven open models that
+span attention designs: multi-head attention (GPT-2, GPT-2-large, Pythia-410M/1.4B), grouped-query
+attention with very few KV heads (Qwen2.5-0.5B/1.5B), and a 4-bit 7B model (Mistral-7B). Timing is
+warmed up and CUDA-event-timed, and isolates \emph{prefill} (decode excluded). Each cell reports two
+speedups: \emph{resident} ($=$ recompute prefill $/$ query-prefill on an already-resident KV --- the
+co-located / shared-broker case, the pure compute win) and \emph{cross-node} (additionally charging the
+serialize/transfer of the KV cache). Correctness is an exact greedy-token match against recompute.
 
-\begin{figure}[h]\centering
-\includegraphics[width=0.82\textwidth]{figures/fig_kv_bridge.png}
-\caption{KV-bridge prefill reuse across the open-model matrix (T4). \emph{Left:} resident prefill
-speedup vs.\ shared-prefix length ($>1$ = faster than recompute). \emph{Right:} KV-cache size relative
-to the text it replaces. \textbf{Figure shows a placeholder; it is regenerated from the committed
-\texttt{kv\_bench\_all.json} via \texttt{paper/figures/gen\_kv\_figure.py} once the benchmark run is in.}}
+\begin{figure}[t]\centering
+\includegraphics[width=\textwidth]{figures/fig_kv_bridge.png}
+\caption{KV-bridge prefill reuse across seven models on an NVIDIA T4 (36 cells, log scales). (a)~Resident
+speedup grows with prefix length and is dramatic for GQA models (solid), reaching $\sim$180$\times$ at
+8k tokens. (b)~With KV transfer charged, GQA stays above break-even while MHA (dashed) mostly does not.
+(c)~The KV cache is thousands of times larger than the text, and far larger for MHA than GQA --- the
+reason transfer cost flips the verdict by architecture.}
 \label{fig:kv}
 \end{figure}
 
-\noindent The hypothesis the figure tests (to be confirmed by the committed run): the resident speedup
-exceeds $1\times$ above a crossover prefix length and grows with prefix length and model size, while
-outputs stay token-lossless; because the KV cache is orders of magnitude larger than the text (and
-larger for MHA than GQA), the cross-node speedup crosses $1\times$ only at long prefixes. This is
-exactly why TOAP gates \textsc{KV\_Bridge} behind same-model and (effective) co-location, falling back
-to \textsc{Ctx\_Ref} otherwise --- a policy choice the measurement grounds rather than assumes.
+\begin{table}[t]\centering\footnotesize
+\begin{tabular}{llrrrrl}
+\toprule
+Model & Attn & Max prefix & KV/text & Resident & Cross-node & Lossless \\
+\midrule
+GPT-2 (124M)      & MHA & 960  & 7.8k  & 1.7$\times$   & 0.6$\times$  & 4/5 \\
+GPT-2-large (774M)& MHA & 960  & 39k   & 2.9$\times$   & 0.5$\times$  & 5/5 \\
+Pythia-410M       & MHA & 2000 & 21k   & 3.7$\times$   & 0.7$\times$  & 5/5 \\
+Pythia-1.4B       & MHA & 2000 & 43k   & 8.9$\times$   & 1.1$\times$  & 5/5 \\
+Mistral-7B (4-bit)& MHA & 2048 & 32k   & 8.4$\times$   & 6.2$\times$  & 4/4 \\
+Qwen2.5-0.5B      & GQA & 8192 & 2.5k  & \textbf{181$\times$} & \textbf{68$\times$} & 6/6 \\
+Qwen2.5-1.5B      & GQA & 8192 & 5.9k  & \textbf{161$\times$} & \textbf{34$\times$} & 6/6 \\
+\bottomrule
+\end{tabular}
+\caption{KV-bridge at each model's longest tested prefix. Resident = co-located compute win; cross-node
+charges KV transfer. KV/text is the cache size relative to the text it replaces. Lossless counts cells
+with byte-identical greedy output (35/36 overall).}
+\label{tab:kv}
+\end{table}
+
+\noindent Three things come out of the run, and they match the hypothesis that motivated the gating
+policy. First, reuse is a \emph{real} compute saving: once the shared prefix passes a crossover of a few
+hundred tokens, the resident speedup climbs steeply --- to roughly $180\times$ for the half-billion-
+parameter Qwen at an 8k prefix, because recompute pays $O(n^2)$ attention over the whole prefix while
+the bridge pays only for the short query. Below the crossover the two are within noise ($\sim$0.9--1.1$\times$),
+which is exactly why the policy does not bridge tiny contexts. Second, the saving is essentially
+\emph{lossless}: 35 of 36 cells produced byte-identical greedy output. The single exception (GPT-2 at a
+512-token prefix) is a one-token divergence from float16 rounding --- prefilling the whole sequence and
+prefilling the query on top of a reused cache accumulate rounding slightly differently --- and would
+disappear in float32; we report it rather than hide it. Third, and most decisive for the architecture,
+the KV cache is \emph{thousands} of times larger than the text it stands in for (Table~\ref{tab:kv}),
+and the ratio depends sharply on attention design: grouped-query models (Qwen, two KV heads) carry an
+order of magnitude less cache than multi-head models (GPT-2-large, twenty heads). The consequence shows
+up in the cross-node column: once the transfer cost of moving that cache is charged, GQA models stay
+comfortably above break-even (Qwen reaches $68\times$) while most MHA models fall below it. In other
+words, KV-bridge is worth it exactly when the producer and consumer are co-located \emph{or} the model
+uses grouped-query attention --- which is precisely the condition \texttt{RegistryKvTransport} encodes,
+falling back to \textsc{Ctx\_Ref} otherwise. The measurement grounds the policy rather than assuming it.
 
 \section{Discussion and Limitations}\label{sec:disc}
 The honest synthesis: \emph{naive transcript accumulation is wasteful; both summarization and
@@ -509,10 +550,15 @@ task:} $n{=}33$ on one incident scenario with a fixed upstream; broader datasets
 does not stress the losslessness advantage --- a harder task that needs a detail a summary would drop
 is exactly the missing experiment. \textbf{Scorer:} keyword coverage is bias-free but coarse; it can
 miss paraphrase. \textbf{Judge:} any model judge here is same-family and is used only as a discarded
-secondary check. \textbf{Implementation scope:} the V2 binary control plane, capability lattice,
-cache-coordinate layout, materialization-with-fallback, and the same-model KV-bridge sidecar are
-implemented and tested. What remains future work is a durable/distributed context store, message
-signing / cross-reconnect replay nonces, and cross-vendor (non-Claude) replication of the token study.
+secondary check. \textbf{KV-bridge scope:} the speedups are microbenchmarks of one prefill step on a single GPU (T4),
+against full recompute --- not against provider prefix-caching, which is the production alternative and
+which we do not claim to beat; ``transfer'' is local serialize/deserialize, not a real RDMA hop; and we
+restrict to same-model prefix reuse with no cross-position splicing. The float16 token divergence in
+one of 36 cells is a reminder that ``lossless'' here means token-identical in practice, not bit-exact
+in theory. \textbf{Implementation scope:} the V2 binary control plane, capability lattice,
+cache-coordinate layout, materialization-with-fallback, and the KV-bridge sidecar are implemented and
+tested; what remains future work is a durable/distributed context store, message signing /
+cross-reconnect replay nonces, and cross-vendor (non-Claude) replication of the token study.
 
 \textbf{On novelty.} We claim none for the mechanism. The contribution is the controlled, bias-free,
 reproducible accounting --- including the finding that a summarizing baseline beats referencing on
@@ -520,12 +566,18 @@ tokens --- and an architecture that makes the byte/token planes and the material
 explicit.
 
 \section{Conclusion}
-Reference-minimized inter-agent messaging removes the waste of transcript accumulation at no measured
-accuracy cost, but it is \emph{not} the cheapest strategy: a competent summarizing orchestrator saves
-more tokens. TOAP earns its place only through losslessness, in-band security, and systematization, and
-in multi-hop/coordination regimes where per-hop summarization is awkward and lossiness is risky. We
+Two measurements, on two cost planes, point the same way. On tokens, reference-minimization removes the
+waste of transcript accumulation at no measured accuracy cost --- but it is not the cheapest option, a
+competent summarizing orchestrator saves more, so TOAP earns referencing's place through losslessness,
+in-band security, and systematization rather than raw token count. On compute, transferring a same-model
+KV cache is a real, near-lossless prefill speedup that grows to two orders of magnitude on long contexts,
+yet the cache is so much larger than the text that it only pays off co-located or under grouped-query
+attention. The common thread is that no single way of sharing context dominates: the right choice
+depends on length, architecture, co-location, and whether lossiness is acceptable --- which is the case
+for making materialization an adaptive, cost-model-driven decision rather than a fixed mechanism. We
 release all artifacts and call for cross-vendor, large-$n$, harder-task replication --- especially a
-task that stresses the lossless-vs-lossy distinction --- before any general claim.
+task that stresses the lossless-versus-lossy distinction, and a comparison of KV-bridge against provider
+prefix-caching --- before any general claim.
 
 \begin{thebibliography}{9}
 \bibitem{erman1980} L.\ Erman, F.\ Hayes-Roth, V.\ Lesser, D.\ Reddy. The Hearsay-II Speech-Understanding
