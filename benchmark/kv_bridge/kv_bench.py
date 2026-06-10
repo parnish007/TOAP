@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
-"""
-KV-bridge benchmark: recompute (re-prefill prefix+query) vs KV-bridge (reuse transferred prefix KV).
+"""Benchmark KV-bridge (reuse a transferred prefix cache) against full recompute.
 
-Measures the things that decide whether TOAP's KV_BRIDGE is ever worth it:
-  1) PREFILL LATENCY  — reusing the prefix KV skips its prefill (the COMPUTE upside).
-  2) TRANSFER COST    — serialize + deserialize the KV (reported separately, never hidden).
-  3) KV BYTE SIZE     — cache size vs the text it replaces (the honest storage/bandwidth cost).
-  4) CORRECTNESS      — do greedy tokens match the recompute baseline EXACTLY? (must be lossless).
+For each (model, prefix-length) we measure prefill latency two ways -- with the prefix KV already
+resident on the GPU, and with the transfer cost charged -- plus the KV cache size relative to the text
+it replaces, and whether the greedy output matches recompute exactly. Lengths sweep up to the model's
+context window so the crossover and the asymptotic speedup are both visible.
 
-It sweeps shared-context lengths to show the crossover, repeats each cell, and is robust:
-  * builds the prefix to an EXACT token count (no over-tokenization warnings);
-  * clamps every length to the model's context window (no index errors);
-  * tolerates CUDA OOM (skips that cell, keeps going);
-  * GQA-aware byte accounting.
+    python kv_bench.py --model gpt2
+    python kv_bench.py --model Qwen/Qwen2.5-0.5B-Instruct
+    python kv_bench.py --model mistralai/Mistral-7B-Instruct-v0.3 --load-in-4bit
 
-Usage:
-  python kv_bench.py --model gpt2                       # auto picks valid lengths < 1024
-  python kv_bench.py --model EleutherAI/pythia-410m --prefix-tokens 256 512 1024 2048
-  python kv_bench.py --model Qwen/Qwen2.5-0.5B-Instruct # GQA model
-  python kv_bench.py --model mistralai/Mistral-7B-Instruct-v0.3 --load-in-4bit
-
-Outputs kv_bench_results.json (and prints a table). Send that JSON back to fold into the paper.
+Writes kv_bench_results.json and prints a table.
 """
 from __future__ import annotations
 import argparse

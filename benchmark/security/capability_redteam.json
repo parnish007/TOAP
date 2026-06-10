@@ -1,0 +1,12 @@
+{
+  "attacks": 13,
+  "benign": 8,
+  "attacks_blocked": 13,
+  "attacks_missed": 0,
+  "benign_allowed": 8,
+  "benign_blocked": 0,
+  "block_rate": 1.0000,
+  "false_positive_rate": 0.0000,
+  "missed": [],
+  "false_positives": []
+}

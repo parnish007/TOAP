@@ -7,7 +7,7 @@ This file is the source of truth for project claims. If a number is not listed u
 v1.0 (Rust). Implemented and tested: protocol core (V1 text + V2 binary), context store
 (ACL/capability-lattice/TTL/deltas/subscriptions), security (rate-limit/replay/capability), broker
 (sessions/routing), client SDK, demo agents, MCP frontend, materialization policy + KV-bridge sidecar.
-**28 automated Rust tests pass.** Three benchmark tiers exist (below): a synthetic wire-token harness,
+**29 automated Rust tests pass.** Three benchmark tiers exist (below): a synthetic wire-token harness,
 a real multi-model token study (Claude Haiku/Sonnet/Opus), and a real multi-model KV-bridge compute
 study (7 open models on a T4).
 

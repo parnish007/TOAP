@@ -18,9 +18,9 @@
 \newcommand{\callout}[1]{\par\vspace{2mm}\noindent\fcolorbox{black!30}{tbox}{%
 \begin{minipage}{0.97\linewidth}\small #1\end{minipage}}\vspace{2mm}\par}
 
-\title{\textbf{TOAP: The Token-Optimized Agent Protocol}\\[1mm]
-\textbf{\large A Reference-Minimized, Two-Plane Architecture for Inter-Agent Messaging,}\\
-\textbf{\large with an Honest Token Accounting and a Multi-Model Pilot}}
+\title{\textbf{TOAP: A Reference-Minimized Protocol for Inter-Agent Messaging}\\[1mm]
+\textbf{\large When Context Sharing Should Be a Reference, a Summary, or a KV Cache ---}\\
+\textbf{\large an Honest, Measured Account}}
 \author{Trilochan Sharma \\ Independent Researcher \\ \texttt{parnishklpo@gmail.com}}
 \date{June 2026}
 
@@ -44,16 +44,21 @@ reference-minimization (TOAP) and a competent summarizing orchestrator \emph{bot
 with no accuracy loss: all 33 samples scored 4/4. But the summarizing baseline saves \emph{more} tokens
 than TOAP ($\sim$2.5$\times$ vs.\ $\sim$1.9$\times$ over the naive baseline). So reference-minimization is
 not a token win over good prompt engineering. What it offers instead is losslessness (a reference can be
-re-expanded; a summary cannot), security (provenance and identity travel with the reference), and
-systematization at the protocol layer. \textbf{(3)} A single-sample accuracy regression we initially observed on Haiku
-\textbf{did not reproduce} at $n{=}5$ and is retracted --- a concrete illustration of why $n{=}1$
-agent measurements are unsafe. \textbf{(4)} On the compute side, we implement and measure the third
-materialization, a same-model KV-cache transfer, on seven open models: reusing a transferred prefix
-cache is a real, near-lossless prefill speedup (35/36 cells byte-identical; up to $\sim$180$\times$ at
-long context) but the cache is thousands of times larger than the text, so it pays off only when agents
-are co-located or use grouped-query attention --- grounding TOAP's gating policy in measurement rather
-than assumption. We also separate wire bytes from model tokens and show symbolic ``opcodes'' save 50\%
-of bytes but only 0--17\% of tokens. We describe the protocol architecture (a two-plane wire format; a
+re-expanded; a summary cannot) and security (provenance travels with the reference), and we now
+\emph{measure} both rather than assert them. On a pre-registered task where a faithful summary
+necessarily drops detail, a downstream responder scores \textbf{8/8 with the reference vs.\ 6/8 with the
+summary}, failing exactly on the dropped facts. Against an adversarial corpus, the capability lattice
+blocks \textbf{13/13} attempts to drive a side-effecting operation from untrusted content with
+\textbf{zero} false positives on benign read/analysis traffic --- a structural guarantee that does not
+depend on how an injection is phrased. (An accuracy regression we first saw on Haiku at $n{=}1$ did not
+reproduce at $n{=}5$ and is retracted --- a small lesson in why single-call agent measurements are
+unsafe.) On the compute side, we implement and measure the third materialization, a same-model KV-cache
+transfer, across seven open models: reusing a transferred prefix cache is a real, near-lossless prefill
+speedup (35/36 cells byte-identical; up to $\sim$180$\times$ at long context), but the cache is
+thousands of times larger than the text, so it only pays off when agents are co-located or use
+grouped-query attention --- which grounds TOAP's gating policy in measurement rather than assumption.
+Throughout we separate wire bytes from model tokens, and show symbolic ``opcodes'' save 50\% of bytes
+but only 0--17\% of tokens. We describe the protocol architecture (a two-plane wire format; a
 reference-materialization spectrum) and a Rust reference implementation. \emph{Threats to validity are
 first-class}: a single model family/tokenizer for the token study, a same-family judge as a secondary
 check only, and small $n$. The mechanism is not novel (blackboard systems, A2A artifacts, ADOL); the
@@ -69,11 +74,22 @@ references, so each agent retrieves only what it needs.
 We try to be conservative about what this buys. The underlying mechanism is old (\S\ref{sec:related}),
 and ``$10\times$'' claims that count bytes rather than tokens are misleading (\S\ref{sec:bytes}). The
 question worth asking is not whether referencing saves tokens, but how it compares to a competently
-engineered baseline, and whether small models pay an accuracy price for it. Our central result is a
-little humbling: a good summarizing orchestrator saves more tokens than reference-minimization at the
-same accuracy. TOAP therefore has to justify itself on losslessness, security, and systematization
-rather than on raw token savings, and most of this paper is about establishing where each of those
-actually matters.
+engineered baseline. Our first result is a little humbling: on an easy task a good summarizing
+orchestrator saves \emph{more} tokens than reference-minimization at the same accuracy. We treat this
+as the start of the argument, not the end of it.
+
+\emph{Thesis.} No single way of sharing context dominates. A summary is cheapest in tokens but lossy;
+a reference is lossless and carries security metadata but costs more tokens; a transferred KV cache is
+the fastest to consume but is enormous and model-bound. Which one wins depends on the regime --- the
+length of the shared context, the model's attention architecture, whether producer and consumer are
+co-located, and whether a later step might need a detail an upfront summary would discard. The
+contribution of this paper is to \emph{measure} those regime boundaries rather than assume them, and to
+give an architecture (TOAP) whose reference primitive can be \emph{materialized} as inline text, a
+context id, or a KV pointer accordingly. Each of the three following claims is now backed by a
+measurement: the summary's lossiness costs downstream accuracy on a task that needs a dropped detail
+(\S\ref{sec:lossless}); the capability lattice blocks a corpus of injection attempts with no false
+positives (\S\ref{sec:security-eval}); and KV transfer's compute win, and its size cost, are mapped
+across seven models (\S\ref{sec:kv-results}).
 
 \callout{\textbf{What is measured vs.\ proposed.} The token experiments (\S\ref{sec:bytes},
 \S\ref{sec:results}) use the implemented V1 text protocol and real model generations; the KV-bridge
@@ -83,17 +99,18 @@ context store with capability-lattice security, the materialization policy, and 
 \textbf{and what remains future work} (durable/distributed store, cross-vendor evaluation, message
 signing).}
 
-\noindent\textbf{Contributions (all framed as a preliminary pilot).}
+\noindent\textbf{Contributions.}
 \begin{enumerate}\itemsep1pt
   \item A two-plane protocol architecture and a reference-materialization spectrum (\S\ref{sec:arch}),
         with a Rust reference implementation (\S\ref{sec:impl}).
-  \item An honest token accounting separating bytes, tokens, and compute, showing symbolic opcodes are
-        a minor lever (\S\ref{sec:bytes}).
-  \item A controlled, $n{=}33$, bias-free-scored comparison of naive / summarizing / reference
-        strategies, with a retracted single-sample regression (\S\ref{sec:results}).
-  \item An implemented, seven-model measurement of same-model KV-cache reuse, showing where the
-        compute win justifies the cache-transfer cost (\S\ref{sec:kv-results}).
-  \item A direct answer to ``why a protocol rather than a better orchestrator?'' (\S\ref{sec:why}).
+  \item An honest token accounting separating bytes, tokens, and compute, including the result that a
+        summarizing baseline beats referencing on tokens (\S\ref{sec:bytes}, \S\ref{sec:results}).
+  \item A pre-registered demonstration that a summary's lossiness costs downstream accuracy when a
+        dropped fact is needed, while a reference does not (\S\ref{sec:lossless}).
+  \item An adversarial evaluation of the capability lattice against a corpus of injection attempts
+        (\S\ref{sec:security-eval}).
+  \item A seven-model measurement of same-model KV-cache reuse, mapping where its compute win justifies
+        the cache-transfer cost (\S\ref{sec:kv-results}).
 \end{enumerate}
 
 \section{Background and Related Work}\label{sec:related}
@@ -343,7 +360,7 @@ load KV).}
 \end{figure}
 
 \subsection{Implemented vs.\ proposed}\label{sec:arch:status}
-\callout{\textbf{Implemented today} (28 passing unit + integration tests): the V1 text protocol and
+\callout{\textbf{Implemented today} (29 passing unit + integration tests): the V1 text protocol and
 parser; the \textbf{V2 binary control plane} (compact binary control header + text semantic payload ---
 the two-plane design, with round-trip tests); the shared context store with per-context ACL, TTL,
 field-level deltas, and subscriptions; a \textbf{capability-lattice} provenance model (Origin $\in$
@@ -389,17 +406,22 @@ tainted context is refused, and a subscriber receives a delta event. A live mult
 sizes reported below are measured on the actual encoder output.
 
 \section{Why a Protocol, Not Just a Better Orchestrator?}\label{sec:why}
-The sharpest objection is: ``just write an orchestrator that summarizes before forwarding.'' Our
+The sharpest objection is: ``just write an orchestrator that summarizes before forwarding.'' Our token
 experiment confirms a summarizing orchestrator is in fact \emph{more} token-efficient than referencing
-(\S\ref{sec:results}). So the case for a protocol does not rest on token savings. It rests on three
-properties a prompt-engineering pattern does not provide: \textbf{(i) Losslessness} --- a reference can
-be re-expanded to the full content on demand; a summary discards information irreversibly, which is
-safe only until a downstream task needs a dropped detail. \textbf{(ii) Security travels with the
-reference} --- provenance/taint and broker-derived identity are enforced structurally, so a compromised
-agent cannot launder untrusted content or spoof a source; a summarizing prompt template offers none of
-this. \textbf{(iii) Systematization} --- the behavior is uniform across heterogeneous agents and
-languages and composes with deduplication (send-once/refer-many) and provider caching, rather than
-being re-implemented per application. TOAP should be adopted for these reasons, or not at all.
+(\S\ref{sec:results}), so the case for a protocol cannot rest on token savings. It rests on two
+properties a prompt-engineering pattern does not provide, and we point to the measurement for each
+rather than asserting them. \textbf{(i) Losslessness.} A reference can be re-expanded on demand; a
+summary discards information irreversibly. This is not hypothetical: when the discarded detail is the
+one a downstream step needs, the summary arm fails and the reference arm does not (8/8 vs.\ 6/8,
+\S\ref{sec:lossless}). \textbf{(ii) Security travels with the reference.} Provenance and broker-derived
+identity are enforced structurally, so untrusted content cannot be laundered into a side-effecting
+operation regardless of how the injection is phrased --- 13/13 attempts blocked at no cost to benign
+traffic (\S\ref{sec:security-eval}); a summarizing prompt template offers none of this. A third
+intended property, \emph{systematization} across heterogeneous agents, is a design goal of the protocol
+but is not something this paper measures (the implementation is single-language and single-node); we
+list it as motivation, not as a result. The honest bottom line is that referencing earns its place in
+exactly the regimes where losslessness or in-band security matters, and yields to summarization where
+neither does.
 
 \section{Experimental Method}\label{sec:method}
 \textbf{Instrument.} Each agent call is an isolated Claude subagent at an explicit model
@@ -418,10 +440,14 @@ single-sample run and is not relied upon here.)
 \textbf{Tokens.} Counted with \texttt{tiktoken} (cl100k) on the exact prompts and verbatim outputs.
 \textbf{Reproducibility.} All prompts, verbatim outputs, and the scorer are committed.
 
-\callout{\textbf{Reviewer-driven changes from the first draft.} (1) $n{=}1$ replaced by $n{=}33$ with
-ranges; (2) a \emph{strong} summarizing baseline added alongside the naive one; (3) a deterministic,
-model-independent scorer replaces reliance on a same-family judge; (4) the architecture now flags
-implemented vs.\ proposed; (5) all empirical claims framed as a preliminary pilot.}
+\callout{\textbf{Reviewer-driven changes.} A first review noted the token study was thin; a second
+noted that the paper disproved its headline without establishing its replacement. In response we
+(1) replaced $n{=}1$ with $n{=}33$ and added a \emph{strong} summarizing baseline; (2) switched to a
+deterministic, model-independent scorer; (3) \emph{ran} the losslessness experiment the earlier draft
+had only named as missing (\S\ref{sec:lossless}); (4) added an adversarial evaluation of the capability
+lattice (\S\ref{sec:security-eval}); and (5) implemented and measured KV transfer across seven models
+(\S\ref{sec:kv-results}). The single-model-family scope of the token study remains, and we ship a
+notebook to retire it (\S\ref{sec:lossless}).}
 
 \section{Results}\label{sec:results}
 \textbf{Accuracy parity; the regression retracted.} All 33 samples scored 4/4 on the deterministic
@@ -474,6 +500,67 @@ store's send-once/refer-many compounds; an exploratory three-stage run showed 1.
 downstream reductions. Separately, TOAP coordination frames are $\sim$17$\times$ smaller in tokens than
 JSON-RPC equivalents (model-independent, exactly reproducible). These are the regimes where a reference
 protocol, rather than per-hop summarization, is the natural fit --- and where losslessness matters most.
+
+\subsection{Losslessness under pressure: when a summary's lossiness costs accuracy}\label{sec:lossless}
+The token experiment above used an easy task on which every strategy reached 4/4, so it could not show
+the cost of a summary's lossiness; that absence was the most important gap in an earlier draft. We
+close it with a pre-registered experiment designed so that lossiness must bite. A 130-word incident
+report carries eight distinct facts (a rollback time, a revenue figure, a PR number, the reason a bad
+config passed staging, and so on). We had a summarizer subagent compress it faithfully to 45 words ---
+a length at which all eight facts cannot survive --- and then asked a downstream responder eight fixed
+questions, each needing one specific fact, under two conditions: \emph{summary} (it sees only the
+45-word summary) and \emph{reference} (it sees the full document, i.e.\ the lossless reference
+materialized). The scenario, questions, and ground-truth answers were fixed before any responder ran;
+grading is deterministic substring matching; three samples per arm.
+
+The faithful summary dropped two of the eight facts (the rollback time and the staging-schema reason).
+The downstream consequence is exactly as predicted: the \textbf{reference arm scores 8/8} in all three
+runs, while the \textbf{summary arm scores 6/8}, missing precisely the two questions whose facts were
+dropped (Table~\ref{tab:lossless}). This is the empirical content of the losslessness claim: a summary
+is cheaper (\S\ref{sec:results}) until a later step needs something it discarded, at which point it
+fails silently; a reference cannot, because the information is still there to be re-read. It is a
+single scenario on the Claude family and we do not generalize the magnitude, but the mechanism it
+demonstrates is not Claude-specific --- any lossy compression of $k$ facts into fewer than $k$ will
+drop some, and any task needing a dropped one will fail. We ship a notebook
+(\texttt{benchmark/ab\_study/lossless/lossless\_colab.ipynb}) that re-runs the identical pre-registered
+experiment on an open instruct model (Qwen/Llama/Mistral) at $n{=}10$ per arm, so the one run that would
+remove the single-family caveat for this claim is a button-press, not a rewrite.
+
+\begin{table}[h]\centering\footnotesize
+\begin{tabular}{lcc}
+\toprule
+Downstream question (fact needed) & Summary arm & Reference arm \\
+\midrule
+Pool ceiling value; revenue; PR \#; lower bound; alert threshold; runbook (6 facts) & 3/3 & 3/3 \\
+Rollback time (09:51) --- \emph{dropped by summary} & \textbf{0/3} & 3/3 \\
+Why staging passed (different schema) --- \emph{dropped by summary} & \textbf{0/3} & 3/3 \\
+\midrule
+\textbf{Total (mean of 3 runs)} & \textbf{6/8} & \textbf{8/8} \\
+\bottomrule
+\end{tabular}
+\caption{Losslessness under pressure. A faithful 45-word summary of an 8-fact document drops two facts;
+the downstream responder then fails exactly those two questions, while the lossless reference answers
+all eight. Pre-registered; deterministic grading; \texttt{benchmark/ab\_study/lossless/}.}
+\label{tab:lossless}
+\end{table}
+
+\subsection{Does the capability lattice actually stop anything?}\label{sec:security-eval}
+\S\ref{sec:arch:security:cap} describes the capability lattice; the fair question is whether it blocks
+real attacks or is merely plausible infrastructure. We evaluate it directly. The threat is a prompt
+injection that tries to make untrusted content (User- or External-origin) drive a side-effecting
+operation: exfiltrate by email, execute a shell command, issue a payment, delete a context. We fire a
+corpus of 13 such attempts and 8 benign requests (read, summarize, classify, and a legitimate
+transform on external content) at the broker's check, which maps the requested opcode to a capability
+and refuses anything the content's provenance does not permit. The lattice \textbf{blocks all 13
+attacks and allows all 8 benign requests} --- a 100\% block rate at a 0\% false-positive rate. The
+result is exact rather than probabilistic for a reason that matters: the decision is made on
+(origin, capability), not on the text, so paraphrasing, obfuscating, or encoding the injection cannot
+change it. This is a structural containment guarantee, not a classifier that can be talked around. Its
+scope is equally clear: it governs what untrusted \emph{content} may be used \emph{for}, and assumes a
+correct provenance tag at ingress; it is not a defense against a compromised broker or a mislabeled
+origin, and it does nothing about injections that stay within an allowed capability (e.g.\ steering a
+summary). The artifact is a committed test (\texttt{crates/toap-context/tests/capability\_redteam.rs})
+so the corpus and outcome are reproducible.
 
 \subsection{KV-bridge: prefill reuse for same-model agents}\label{sec:kv-results}
 The third materialization, \textsc{KV\_Bridge}, transfers a shared context's key/value cache so the
@@ -542,28 +629,44 @@ slightly costlier but lossless, secure, and systematic} (\S\ref{sec:why}). The r
 regression is itself a result: \textbf{single-call agent measurements are unsafe}, and apparent
 small-model effects must be checked with replication.
 
-We state threats plainly and treat them as first-class. \textbf{Single model family / one tokenizer:}
-Haiku/Sonnet/Opus differ by scale, not architecture; token claims are tokenizer-dependent, so
-cross-vendor (GPT/Gemini/Llama) replication is required and untested. \textbf{Small $n$ and a single
-task:} $n{=}33$ on one incident scenario with a fixed upstream; broader datasets are needed.
-\textbf{Saturated accuracy:} the four-theme task was easy enough that all strategies reached 4/4, so it
-does not stress the losslessness advantage --- a harder task that needs a detail a summary would drop
-is exactly the missing experiment. \textbf{Scorer:} keyword coverage is bias-free but coarse; it can
-miss paraphrase. \textbf{Judge:} any model judge here is same-family and is used only as a discarded
-secondary check. \textbf{KV-bridge scope:} the speedups are microbenchmarks of one prefill step on a single GPU (T4),
-against full recompute --- not against provider prefix-caching, which is the production alternative and
-which we do not claim to beat; ``transfer'' is local serialize/deserialize, not a real RDMA hop; and we
-restrict to same-model prefix reuse with no cross-position splicing. The float16 token divergence in
-one of 36 cells is a reminder that ``lossless'' here means token-identical in practice, not bit-exact
-in theory. \textbf{Implementation scope:} the V2 binary control plane, capability lattice,
-cache-coordinate layout, materialization-with-fallback, and the KV-bridge sidecar are implemented and
-tested; what remains future work is a durable/distributed context store, message signing /
-cross-reconnect replay nonces, and cross-vendor (non-Claude) replication of the token study.
+We state threats plainly and treat them as first-class; each of our claims is demonstrated in a
+controlled setting, and in several cases we have not yet shown that it holds in the regime where it
+would matter most. We say where that is true rather than imply otherwise.
+
+\textbf{Token study: one model family, one tokenizer.} The token and accuracy numbers come from Claude
+Haiku/Sonnet/Opus, which share a tokenizer and architecture family; token counts are tokenizer-specific
+and the prompt-following behaviour may be Claude-specific. This is a single-family study at three
+scales, not a cross-vendor one. The KV-bridge study (\S\ref{sec:kv-results}) does span seven open
+models and three attention designs, but the \emph{token} comparison does not, and a Llama/GPT/Gemini
+replication of the token and losslessness experiments remains the most important piece of missing
+breadth. \textbf{Small $n$, few scenarios.} The token comparison is $n{=}33$ on one scenario with a
+fixed upstream; with $n{=}3$ per Sonnet/Opus cell the per-cell ratios are indicative, not tight
+estimates. The losslessness result (\S\ref{sec:lossless}) is a single pre-registered scenario with
+$n{=}3$ per arm: it shows the mechanism --- a faithful summary drops facts and a downstream task that
+needs one then fails --- but, by construction, it cannot tell us \emph{how often} real tasks hit that
+case. Generalising it needs several document types (e.g.\ contracts, specifications) at larger $n$, and
+we frame it as existence, not frequency. \textbf{Security corpus is small and tests the guaranteed
+part.} The 13-attack red team (\S\ref{sec:security-eval}) confirms the lattice blocks side-effecting
+operations on untrusted content, but the block rate is structural (decided on origin and capability,
+not text), so what it really verifies is that the check is implemented and that the categories we
+thought of are covered. It does \emph{not} probe the surface that is \emph{not} guaranteed by
+construction: a mislabeled origin at ingress, a compromised broker, or an injection that stays within
+an allowed capability (e.g.\ steering a summary). Those are real and we do not evaluate them here.
+\textbf{KV-bridge scope.} The speedups are microbenchmarks of one prefill step on a single GPU (T4)
+against full recompute, not against provider prefix-caching (the production alternative, which we do not
+claim to beat); ``transfer'' is local serialize/deserialize, not an RDMA hop; and we restrict to
+same-model prefix reuse. The one float16 divergence in 36 cells means ``lossless'' here is
+token-identical in practice, not bit-exact in theory. \textbf{Implementation is single-node.} The
+broker is one in-memory process. The protocol's \emph{systematization} argument --- uniform behaviour
+across many heterogeneous agents --- only bites at scale, and that is precisely the regime we have not
+built; durable/distributed storage, message signing, and cross-reconnect replay nonces are future work.
+We therefore present systematization as a design goal, not a measured result.
 
 \textbf{On novelty.} We claim none for the mechanism. The contribution is the controlled, bias-free,
-reproducible accounting --- including the finding that a summarizing baseline beats referencing on
-tokens --- and an architecture that makes the byte/token planes and the materialization choice
-explicit.
+reproducible accounting --- a summarizing baseline beats referencing on tokens, lossiness costs
+downstream accuracy when a dropped fact is needed, the capability lattice contains the attacks it is
+designed to, and KV transfer's compute win and size cost mapped across seven models --- together with
+an architecture that makes the byte/token planes and the materialization choice explicit.
 
 \section{Conclusion}
 Two measurements, on two cost planes, point the same way. On tokens, reference-minimization removes the
@@ -599,7 +702,7 @@ Artifacts: \texttt{benchmark/ab\_study/} (harness, scenarios, the $n{=}33$ run r
 \texttt{runs/writer\_runs.json}, deterministic scorer \texttt{writer\_experiment.py}, analysis
 \texttt{compute\_writer.py}); \texttt{paper/figures/} (figure scripts); \texttt{paper/METHODS.md} and
 \texttt{paper/REVIEW\_RESPONSE.md} (method log and the reviewer-fix trail). The Rust implementation is
-in \texttt{crates/} (28 unit + integration tests, incl.\ real-TCP end-to-end, V2 binary round-trip,
+in \texttt{crates/} (29 unit + integration tests, incl.\ real-TCP end-to-end, V2 binary round-trip,
 capability-lattice flow, cache layout, and KV-bridge fallback). Token reductions recompute exactly
 from the committed records via \texttt{compute\_writer.py}.
 \end{document}

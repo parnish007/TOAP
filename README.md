@@ -6,7 +6,7 @@
 
 <div align="center">
 
-[![Typing SVG](https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=18&pause=1200&color=2F6F4F&center=true&vCenter=true&width=720&lines=Store+context+once%2C+reference+it+by+ID%2C+validate+every+hop;Two-plane+wire+format%3A+bytes+for+the+broker%2C+tokens+for+the+LLM;Honest+multi-model+pilot%3A+n%3D33%2C+bias-free+scoring;Finding%3A+a+good+summarizer+BEATS+TOAP+on+tokens+%E2%80%94+we+say+so;28+tests+passing+%7C+broker-derived+identity+%7C+capability+lattice)](https://git.io/typing-svg)
+[![Typing SVG](https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=18&pause=1200&color=2F6F4F&center=true&vCenter=true&width=720&lines=Store+context+once%2C+reference+it+by+ID%2C+validate+every+hop;Two-plane+wire+format%3A+bytes+for+the+broker%2C+tokens+for+the+LLM;Honest+multi-model+pilot%3A+n%3D33%2C+bias-free+scoring;Finding%3A+a+good+summarizer+BEATS+TOAP+on+tokens+%E2%80%94+we+say+so;29+tests+passing+%7C+broker-derived+identity+%7C+capability+lattice)](https://git.io/typing-svg)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ![Status](https://img.shields.io/badge/status-v1.0_working-2F855A?style=for-the-badge)
 ![Rust](https://img.shields.io/badge/Rust-stable-DEA584?style=for-the-badge&logo=rust&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-28_passing-22C55E?style=for-the-badge&logo=checkmarx&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-29_passing-22C55E?style=for-the-badge&logo=checkmarx&logoColor=white)
 ![Pilot](https://img.shields.io/badge/multi--model_pilot-Haiku·Sonnet·Opus-7C3AED?style=for-the-badge)
 ![License](https://img.shields.io/badge/code-MIT-1682D4?style=for-the-badge)
 ![Paper](https://img.shields.io/badge/paper-CC--BY--4.0-EF4444?style=for-the-badge)
@@ -80,7 +80,7 @@ WITH TOAP — content lives once, only IDs travel
 git clone https://github.com/parnish007/TOAP.git
 cd TOAP
 cargo build --workspace
-cargo test  --workspace          # 28 tests pass
+cargo test  --workspace          # 29 tests pass
 ```
 
 **Live fan-out demo** (4 terminals): broker, two workers, then the orchestrator —
@@ -170,7 +170,7 @@ xychart-beta
 
 ### 3. Implemented vs. roadmap
 
-| Implemented (28 tests) | Roadmap (needs a model runtime / external models) |
+| Implemented (29 tests) | Roadmap (needs a model runtime / external models) |
 |:--|:--|
 | V1 text + V2 binary planes | KV-cache **tensor transport** (only the `KvTransport` trait exists) |
 | Context store: ACL, capability lattice, TTL, deltas, subscriptions | **Cross-vendor** real-LLM replication (GPT / Gemini / Llama) |
@@ -331,7 +331,7 @@ rustup component add rust-mingw      # provides self-contained MinGW libs
 
 ```powershell
 cargo build --workspace
-cargo test --workspace          # 28 tests
+cargo test --workspace          # 29 tests
 ```
 
 Python benchmarks: `pip install -r requirements-dev.txt` (tiktoken + matplotlib).

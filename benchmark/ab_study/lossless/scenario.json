@@ -1,0 +1,15 @@
+{
+  "id": "lossless_incident",
+  "design": "Pre-registered before any subagent ran. The document holds 8 distinct factual details. A faithful ~45-word summary CANNOT carry all 8, so some are necessarily dropped (natural lossiness, not sabotage). A downstream responder answers 8 fixed questions, each needing one specific detail, under two arms: SUMMARY (sees only the summary) vs TOAP (sees the full document, i.e. the reference materialized losslessly). Hypothesis: TOAP answers >= SUMMARY, with the gap on exactly the details the summary dropped.",
+  "document": "Post-incident report, INC-7732. The checkout service degraded on 14 March between 09:12 and 09:58 UTC. Root cause: a config push set the database connection-pool ceiling to 25 (down from the intended 250), so the pool saturated under normal load. The on-call engineer, Priya Nair, rolled back the config at 09:51. Customer impact: 4,310 failed checkouts and an estimated 18,700 USD in lost revenue. A contributing factor was that the staging environment uses a different config schema, so the bad value passed staging validation. The fix shipped in PR #4471, which adds a hard lower bound of 100 on the pool ceiling and a schema-parity check between staging and production. One follow-up remains open: the alert for pool saturation fires at 95% utilisation, which the team agreed is too late and should move to 80%. The incident commander noted that the runbook link in the alert was stale and pointed to a deleted wiki page.",
+  "questions": [
+    {"q": "What value was the database connection-pool ceiling mistakenly set to?", "answer_substrings": ["25"], "fact": "pool ceiling 25"},
+    {"q": "Who rolled back the config, and at what time?", "answer_substrings": ["Priya", "09:51"], "fact": "Priya Nair at 09:51"},
+    {"q": "How many failed checkouts occurred?", "answer_substrings": ["4,310", "4310"], "fact": "4310 failed checkouts"},
+    {"q": "Which PR shipped the fix?", "answer_substrings": ["4471"], "fact": "PR #4471"},
+    {"q": "What hard lower bound on the pool ceiling does the fix add?", "answer_substrings": ["100"], "fact": "lower bound 100"},
+    {"q": "Why did the bad config value pass staging validation?", "answer_substrings": ["different config schema", "different schema", "schema"], "fact": "staging uses a different schema"},
+    {"q": "What utilisation threshold should the saturation alert move to?", "answer_substrings": ["80"], "fact": "alert should move to 80%"},
+    {"q": "What was wrong with the runbook link in the alert?", "answer_substrings": ["stale", "deleted"], "fact": "stale runbook link to a deleted page"}
+  ]
+}

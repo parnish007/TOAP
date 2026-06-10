@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""
-TOAP KV-bridge — minimal but REAL implementation.
+"""KV-bridge: reuse a transferred prefix KV cache instead of re-prefilling shared context as text.
 
-The idea (TOAP's KV_BRIDGE materialization): instead of re-sending a shared context as text and making
-the next agent re-prefill it, transfer the already-computed key/value cache for that context. The
-receiver then only prefills its own (short) query suffix and decodes.
+This is the implemented backend for TOAP's KV_BRIDGE materialization. It covers the one case that is
+actually correct without tricks -- same model, same tokenizer, prefix reuse. The shared context's KV is
+computed at absolute positions 0..n and the query is appended at positions n.., so RoPE and absolute
+positions stay valid. We do not splice a cache baked at different positions; that is the failure mode the
+literature warns about, and pretending otherwise would be dishonest.
 
-This module implements the genuinely-correct case: SAME MODEL, SAME TOKENIZER, PREFIX REUSE. The shared
-context's KV is computed at absolute positions 0..n; the query is appended at positions n.., so RoPE /
-absolute positions stay valid (this is the constraint the literature flags — we respect it instead of
-pretending it away). Splicing a cache baked at different positions is explicitly NOT done here.
+Compute and transfer are measured separately: the compute win is the prefill we skip by reusing the
+cache, and the transfer cost is serializing/deserializing the KV tensors (plus their size relative to
+the text). A real deployment co-locates producer and consumer, so the headline is the compute side, but
+the transfer cost is reported alongside it so the trade-off stays visible.
 
-We measure two costs separately and honestly:
-  * COMPUTE win   = prefill latency of (recompute prefix+query)  vs (prefill ONLY the query).
-  * TRANSFER cost = serialize + move + deserialize the KV tensors, and their byte size vs the text.
-A real deployment co-locates producer and consumer (shared GPU / NVLink / RDMA), so the headline win is
-the compute side; the transfer cost is reported so the trade-off is never hidden.
-
-Robust across transformers versions: tolerates DynamicCache, legacy tuples, and layers whose key/value
-are temporarily ``None``; GQA-aware (counts real KV-head tensors).
+The cache-handling helpers tolerate the assorted shapes transformers has shipped (DynamicCache on 5.x,
+legacy tuples on 4.x, occasional None layers) and are GQA-aware.
 """
 from __future__ import annotations
 import io
