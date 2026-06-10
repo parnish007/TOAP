@@ -395,6 +395,38 @@ downstream reductions. Separately, TOAP coordination frames are $\sim$17$\times$
 JSON-RPC equivalents (model-independent, exactly reproducible). These are the regimes where a reference
 protocol, rather than per-hop summarization, is the natural fit --- and where losslessness matters most.
 
+\subsection{KV-bridge: prefill reuse for same-model agents}\label{sec:kv-results}
+The third materialization, \textsc{KV\_Bridge}, transfers a shared context's key/value cache so the
+receiver prefills only its query suffix. We evaluate the same-model, same-tokenizer prefix-reuse case
+(absolute positions preserved; no cross-position splicing) across an open-model matrix spanning
+multi-head attention (GPT-2 family), rotary/NeoX (Pythia), and grouped-query attention
+(Qwen2.5, Mistral-7B in 4-bit) on an NVIDIA T4. Timing is warmed-up, CUDA-event-timed, and isolates
+\emph{prefill} (decode excluded). We report two speedups per cell: \emph{resident}
+($=$ recompute prefill $/$ query-prefill on an already-resident KV --- the co-located / shared-broker
+case, the pure compute win) and \emph{cross-node} (additionally charging KV deserialize/transfer).
+Correctness is exact greedy-token match vs.\ recompute.
+
+% === AWAITING COLAB DATA: fill Table~\ref{tab:kv} + Figure from benchmark/kv_bridge/kv_bench_all.json ===
+% \begin{table}[h]\centering\footnotesize
+% \begin{tabular}{llrrrrc}
+% \toprule
+% Model & Attn & Prefix & KV/text & Speedup (resident) & Speedup (x-node) & Lossless \\
+% \midrule
+% ... rows from kv_bench_all.json ...
+% \bottomrule
+% \end{tabular}
+% \caption{KV-bridge prefill reuse (T4). Resident = co-located compute win; x-node includes transfer.}
+% \label{tab:kv}
+% \end{table}
+
+\noindent\emph{Result placeholder (to be filled from the committed run records).} We expect the
+resident speedup to exceed $1\times$ above a crossover prefix length and to grow with prefix length and
+model size, with outputs token-lossless; the KV cache is orders of magnitude larger than the text it
+replaces (and larger for MHA than GQA), so the cross-node speedup crosses $1\times$ only at long
+prefixes. This is exactly why TOAP gates \textsc{KV\_Bridge} behind same-model and (effective)
+co-location, falling back to \textsc{Ctx\_Ref} otherwise --- a policy choice the measurement is meant to
+ground rather than assume.
+
 \section{Discussion and Limitations}\label{sec:disc}
 The honest synthesis: \emph{naive transcript accumulation is wasteful; both summarization and
 referencing fix it at equal accuracy here; summarization is cheaper on tokens but lossy; referencing is
