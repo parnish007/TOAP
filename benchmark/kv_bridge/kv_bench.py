@@ -166,7 +166,11 @@ def main():
         json.dump(result, f, indent=2)
     print(f"\n[written] {a.out}")
 
-    if rows and not all(r["outputs_match"] for r in rows):
+    if not rows:
+        print("ERROR: produced ZERO rows — every cell was skipped (likely a transformers/cache API "
+              "mismatch). The result JSON is empty; do not use it.", file=sys.stderr)
+        sys.exit(3)
+    if not all(r["outputs_match"] for r in rows):
         print("WARNING: some KV-bridge outputs did NOT match recompute — investigate before claiming "
               "losslessness.", file=sys.stderr)
 

@@ -77,7 +77,10 @@ def model_context_limit(tok, model, fallback: int = 4096) -> int:
 # ---------------------------------------------------------------------------
 
 def _iter_layers(past):
-    """Yield (key, value) per layer from a DynamicCache or legacy tuple. Skips None placeholders."""
+    """Yield (key, value) per layer across transformers versions. Skips None placeholders.
+
+    Handles: legacy tuple ((k,v),...); transformers 5.x DynamicCache (``.layers[i].keys/.values``);
+    transformers 4.x DynamicCache (``.to_legacy_cache()`` or ``.key_cache/.value_cache``)."""
     if past is None:
         return
     # legacy tuple/list form: ((k, v), (k, v), ...)
@@ -85,20 +88,27 @@ def _iter_layers(past):
         for layer in past:
             if layer is None:
                 continue
-            k, v = layer[0], layer[1]
-            yield k, v
+            yield layer[0], layer[1]
         return
-    # DynamicCache (newer): prefer .to_legacy_cache(), else .key_cache/.value_cache
+    # transformers 5.x: DynamicCache.layers -> list of DynamicLayer(.keys, .values)
+    layers = getattr(past, "layers", None)
+    if layers is not None:
+        for layer in layers:
+            k = getattr(layer, "keys", None)
+            v = getattr(layer, "values", None)
+            if k is not None and v is not None:
+                yield k, v
+        return
+    # transformers 4.x: to_legacy_cache()
     if hasattr(past, "to_legacy_cache"):
         try:
-            legacy = past.to_legacy_cache()
-            for layer in legacy:
-                if layer is None:
-                    continue
-                yield layer[0], layer[1]
+            for layer in past.to_legacy_cache():
+                if layer is not None:
+                    yield layer[0], layer[1]
             return
         except Exception:
             pass
+    # transformers 4.x: .key_cache / .value_cache lists
     kc = getattr(past, "key_cache", None)
     vc = getattr(past, "value_cache", None)
     if kc is not None and vc is not None:
@@ -141,15 +151,36 @@ def serialize_kv(past) -> bytes:
     return buf.getvalue()
 
 
+def _make_cache_from_layers(layers, device):
+    """Build a cache object the model's forward pass accepts, across transformers versions.
+
+    layers: list of [key, value] tensors (one per decoder layer), already on CPU.
+    Strategy that works on 4.x AND 5.x: create an empty DynamicCache and populate it with
+    ``cache.update(k, v, layer_idx)`` — the public API used during generation. Falls back to
+    ``from_legacy_cache`` (4.x) and finally to a bare tuple (very old)."""
+    layers = [(k.to(device), v.to(device)) for (k, v) in layers]
+    if DynamicCache is not None:
+        try:
+            cache = DynamicCache()
+            for i, (k, v) in enumerate(layers):
+                cache.update(k, v, i)            # public update API (4.x and 5.x)
+            return cache
+        except Exception:
+            pass
+        if hasattr(DynamicCache, "from_legacy_cache"):
+            try:
+                return DynamicCache.from_legacy_cache(tuple(layers))
+            except Exception:
+                pass
+    return tuple(layers)
+
+
 def deserialize_kv(blob: bytes, device):
-    """Rehydrate KV from bytes onto the target device and wrap as a DynamicCache (legacy fallback)."""
+    """Rehydrate KV from bytes onto the target device as a forward-pass-compatible cache."""
     buf = io.BytesIO(blob)
     # weights_only=True: the blob is only tensors; never unpickle arbitrary objects from the wire.
-    legacy = torch.load(buf, map_location=device, weights_only=True)
-    legacy = tuple((k.to(device), v.to(device)) for (k, v) in legacy)
-    if DynamicCache is not None and hasattr(DynamicCache, "from_legacy_cache"):
-        return DynamicCache.from_legacy_cache(legacy)
-    return legacy
+    layers = torch.load(buf, map_location="cpu", weights_only=True)
+    return _make_cache_from_layers(layers, device)
 
 
 # ---------------------------------------------------------------------------
@@ -164,12 +195,48 @@ class GenResult:
     total_ms: float = 0.0
 
 
+def _cache_len(cache) -> int:
+    """Current sequence length held in a cache, across versions (for absolute positioning)."""
+    if cache is None:
+        return 0
+    for attr in ("get_seq_length",):
+        fn = getattr(cache, attr, None)
+        if callable(fn):
+            try:
+                return int(fn())
+            except Exception:
+                pass
+    # fall back: read the seq dim of the first key tensor
+    for k, _v in _iter_layers(cache):
+        if k is not None and k.dim() == 4:
+            return int(k.shape[2])
+    return 0
+
+
 @torch.no_grad()
-def _greedy(model, input_ids, past, new_tokens):
+def _forward_at(model, input_ids, cache, device):
+    """Forward `input_ids` on top of `cache`, placing them at the correct ABSOLUTE positions.
+
+    Passing explicit cache_position + a full attention_mask keeps RoPE/abs-positions valid when the
+    query is appended after a transferred prefix — this is what makes KV-bridge token-lossless. Falls
+    back to a plain call on versions that infer position automatically."""
+    past_len = _cache_len(cache)
+    seq = input_ids.shape[1]
+    try:
+        cache_position = torch.arange(past_len, past_len + seq, device=device)
+        attn = torch.ones((input_ids.shape[0], past_len + seq), dtype=torch.long, device=device)
+        return model(input_ids, past_key_values=cache, use_cache=True,
+                     cache_position=cache_position, attention_mask=attn)
+    except TypeError:
+        return model(input_ids, past_key_values=cache, use_cache=True)
+
+
+@torch.no_grad()
+def _greedy(model, input_ids, past, new_tokens, device):
     """Greedy decode `new_tokens` steps starting from `input_ids` with optional `past`."""
     generated, cur, cache = [], input_ids, past
     for _ in range(new_tokens):
-        out = model(cur, past_key_values=cache, use_cache=True)
+        out = _forward_at(model, cur, cache, device)
         cache = out.past_key_values
         nxt = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
         generated.append(int(nxt))
@@ -190,7 +257,7 @@ def generate_recompute(model, prefix_ids, query_ids, new_tokens, device):
     out = model(full, use_cache=True)                  # prefill over prefix+query (the wasted work)
     _sync(device); prefill_ms = (time.perf_counter() - t0) * 1000
     first = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-    rest = _greedy(model, first, out.past_key_values, new_tokens - 1) if new_tokens > 1 else []
+    rest = _greedy(model, first, out.past_key_values, new_tokens - 1, device) if new_tokens > 1 else []
     _sync(device); total_ms = (time.perf_counter() - t0) * 1000
     return GenResult([int(first)] + rest, prefill_ms, 0.0, total_ms)
 
@@ -199,16 +266,18 @@ def generate_recompute(model, prefix_ids, query_ids, new_tokens, device):
 def generate_kv_bridge(model, prefix_kv_blob, query_ids, new_tokens, device):
     """KV-bridge: the receiver gets the prefix KV (already computed) + the query text.
     It prefills ONLY the query, reusing the transferred prefix cache. Transfer (deserialize) time is
-    measured SEPARATELY from prefill, so the compute win and the transfer cost are not conflated."""
+    measured SEPARATELY from prefill, so the compute win and the transfer cost are not conflated.
+    The query is forwarded at ABSOLUTE positions prefix_len.. (via _forward_at) so RoPE/positions stay
+    valid and outputs stay token-lossless vs recompute."""
     _sync(device); t_tr = time.perf_counter()
     cache = deserialize_kv(prefix_kv_blob, device)     # transfer + rehydrate
     _sync(device); transfer_ms = (time.perf_counter() - t_tr) * 1000
 
     t0 = time.perf_counter()
-    out = model(query_ids, past_key_values=cache, use_cache=True)   # prefill ONLY the query
+    out = _forward_at(model, query_ids, cache, device)   # prefill ONLY the query, at correct positions
     _sync(device); prefill_ms = (time.perf_counter() - t0) * 1000
     first = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-    rest = _greedy(model, first, out.past_key_values, new_tokens - 1) if new_tokens > 1 else []
+    rest = _greedy(model, first, out.past_key_values, new_tokens - 1, device) if new_tokens > 1 else []
     _sync(device); total_ms = (time.perf_counter() - t0) * 1000 + transfer_ms
     return GenResult([int(first)] + rest, prefill_ms, transfer_ms, total_ms)
 
