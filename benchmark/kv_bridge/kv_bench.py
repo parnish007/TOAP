@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import statistics
 import sys
 
 import torch
@@ -100,13 +99,14 @@ def main():
     print(f"prefix lengths: {lengths}\n")
 
     rows = []
-    hdr = (f"{'prefix_tok':>10} {'kv_size':>9} {'text':>8} {'kv/text':>8} "
-           f"{'recomp_ms':>10} {'bridge_ms':>10} {'xfer_ms':>8} {'speedup':>8} {'match':>6}")
+    hdr = (f"{'prefix':>7} {'kv_size':>9} {'kv/text':>8} {'recomp_ms':>10} {'resident_ms':>11} "
+           f"{'xfer_ms':>8} {'sp_resident':>11} {'sp_xnode':>9} {'match':>6}")
     print(hdr); print("-" * len(hdr))
 
     for n in lengths:
         try:
-            prefix = build_prefix(tok, n, device)
+            prefix = kvb.build_prefix(tok, n, device) if hasattr(kvb, "build_prefix") \
+                else build_prefix(tok, n, device)
             actual_n = prefix.shape[1]
             text_bytes = len(tok.decode(prefix[0]).encode("utf-8"))
 
@@ -114,52 +114,53 @@ def main():
             kv_size = kvb.kv_byte_size(kv)
             shape = kvb.kv_shape_info(kv)
             blob = kvb.serialize_kv(kv)
+            factory = kvb.resident_cache_factory(kv, device)
 
-            rec_pref, br_pref, xfer, matches = [], [], [], []
-            for _ in range(a.repeats):
-                r = kvb.generate_recompute(model, prefix, query, a.new_tokens, device)
-                b = kvb.generate_kv_bridge(model, blob, query, a.new_tokens, device)
-                rec_pref.append(r.prefill_ms)
-                br_pref.append(b.prefill_ms)
-                xfer.append(b.transfer_ms)
-                matches.append(r.tokens == b.tokens)
+            # Three independent, warmed-up, CUDA-event-timed measurements:
+            rec_med, rec_mean, rec_std, _ = kvb.measure_prefill_recompute(
+                model, prefix, query, device, iters=a.repeats)
+            res_med, res_mean, res_std, _ = kvb.measure_prefill_bridge_resident(
+                model, factory, query, device, iters=a.repeats)
+            xf_med, xf_mean, xf_std, _ = kvb.measure_transfer(blob, device)
+            match, _toks = kvb.check_lossless(model, prefix, query, blob, device, new_tokens=a.new_tokens)
 
-            rec_m, br_m, xf_m = statistics.mean(rec_pref), statistics.mean(br_pref), statistics.mean(xfer)
-            speedup = rec_m / br_m if br_m else float("nan")
-            all_match = all(matches)
+            sp_resident = rec_med / res_med if res_med else float("nan")     # pure compute win (co-located)
+            sp_xnode = rec_med / (res_med + xf_med) if (res_med + xf_med) else float("nan")  # with transfer tax
             ratio = kv_size / text_bytes if text_bytes else None
-            print(f"{actual_n:>10} {human(kv_size):>9} {human(text_bytes):>8} "
-                  f"{(ratio or 0):>7.0f}x {rec_m:>10.2f} {br_m:>10.2f} {xf_m:>8.2f} "
-                  f"{speedup:>7.2f}x {str(all_match):>6}")
+            print(f"{actual_n:>7} {human(kv_size):>9} {(ratio or 0):>7.0f}x {rec_med:>10.2f} "
+                  f"{res_med:>11.2f} {xf_med:>8.2f} {sp_resident:>10.2f}x {sp_xnode:>8.2f}x "
+                  f"{str(match):>6}")
             rows.append({
                 "prefix_tokens": actual_n, "kv_bytes": kv_size,
                 "kv_bytes_per_token": kv_size / actual_n, "kv_shape": shape,
                 "text_bytes": text_bytes, "kv_vs_text_ratio": ratio,
-                "recompute_prefill_ms_mean": rec_m, "recompute_prefill_ms_min": min(rec_pref),
-                "recompute_prefill_ms_max": max(rec_pref),
-                "bridge_prefill_ms_mean": br_m, "bridge_prefill_ms_min": min(br_pref),
-                "bridge_prefill_ms_max": max(br_pref),
-                "transfer_ms_mean": xf_m,
-                "prefill_speedup": speedup, "outputs_match": all_match,
+                "recompute_prefill_ms_median": rec_med, "recompute_prefill_ms_std": rec_std,
+                "bridge_resident_prefill_ms_median": res_med, "bridge_resident_prefill_ms_std": res_std,
+                "transfer_ms_median": xf_med, "transfer_ms_std": xf_std,
+                "speedup_resident": sp_resident,      # co-located: pure compute win, no transfer
+                "speedup_crossnode": sp_xnode,        # includes serialize/deserialize transfer tax
+                "outputs_match": match,
             })
-            del kv, blob
+            del kv, blob, factory
             if device == "cuda":
                 torch.cuda.empty_cache()
         except torch.cuda.OutOfMemoryError:
-            print(f"{n:>10}  (skipped: CUDA OOM)")
+            print(f"{n:>7}  (skipped: CUDA OOM)")
             if device == "cuda":
                 torch.cuda.empty_cache()
         except Exception as e:                       # keep the sweep going; record the failure
-            print(f"{n:>10}  (skipped: {type(e).__name__}: {e})")
+            print(f"{n:>7}  (skipped: {type(e).__name__}: {e})")
             if device == "cuda":
                 torch.cuda.empty_cache()
 
     result = {
         "model": a.model, "device": device, "gpu": gpu, "dtype": dtype,
-        "context_limit": limit, "new_tokens": a.new_tokens, "repeats": a.repeats,
+        "context_limit": limit, "new_tokens": a.new_tokens, "iters_per_cell": a.repeats,
         "load_in_4bit": a.load_in_4bit,
-        "note": ("prefix-reuse only (absolute positions preserved); transfer_ms = deserialize/rehydrate "
-                 "measured separately from prefill; co-located deployment amortizes transfer"),
+        "note": ("Warmed-up CUDA-event timing of PREFILL ONLY (decode excluded). speedup_resident = "
+                 "recompute / query-prefill-on-resident-KV (co-located, pure compute win). "
+                 "speedup_crossnode = recompute / (query-prefill + KV deserialize) (with transfer tax). "
+                 "prefix-reuse only, absolute positions preserved. outputs_match = greedy losslessness."),
         "rows": rows,
     }
     with open(a.out, "w", encoding="utf-8") as f:

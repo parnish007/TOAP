@@ -123,6 +123,37 @@ def extract_kv(model, prefix_ids):
     return out.past_key_values
 
 
+def _make_cache_on_device(layers, device):
+    """Build a forward-compatible cache from (k, v) tensors already on `device`."""
+    if DynamicCache is not None:
+        try:
+            cache = DynamicCache()
+            for i, (k, v) in enumerate(layers):
+                cache.update(k, v, i)
+            return cache
+        except Exception:
+            pass
+        if hasattr(DynamicCache, "from_legacy_cache"):
+            try:
+                return DynamicCache.from_legacy_cache(tuple(layers))
+            except Exception:
+                pass
+    return tuple(layers)
+
+
+def resident_cache_factory(past, device):
+    """Return a callable producing a fresh GPU-resident cache cloned from `past` each call.
+
+    KV tensors stay on-device (no host round-trip), so timing a query prefill against this isolates the
+    pure COMPUTE win of skipping the prefix prefill (the co-located / shared-broker case)."""
+    base = [(k.detach().contiguous(), v.detach().contiguous()) for (k, v) in _iter_layers(past)
+            if k is not None and v is not None]
+
+    def make():
+        return _make_cache_on_device([(k.clone(), v.clone()) for (k, v) in base], device)
+    return make
+
+
 def kv_byte_size(past) -> int:
     """Real size of the KV cache in bytes (sum of all key/value tensors; GQA-aware, None-safe)."""
     total = 0
@@ -247,6 +278,68 @@ def _greedy(model, input_ids, past, new_tokens, device):
 def _sync(device):
     if device == "cuda":
         torch.cuda.synchronize()
+
+
+@torch.no_grad()
+def _time_call(fn, device, warmup=3, iters=15):
+    """Time a no-arg callable with GPU warmup + CUDA events (accurate) or perf_counter (CPU).
+
+    Returns (median_ms, mean_ms, std_ms, samples). Warmup absorbs first-call kernel autotuning — the
+    artifact that made naive single-shot timing report a fake <1x 'slowdown' at short prefixes."""
+    for _ in range(warmup):
+        fn()
+    _sync(device)
+    samples = []
+    use_events = (device == "cuda")
+    for _ in range(iters):
+        if use_events:
+            e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            e0.record(); fn(); e1.record(); torch.cuda.synchronize()
+            samples.append(e0.elapsed_time(e1))
+        else:
+            t0 = time.perf_counter(); fn(); samples.append((time.perf_counter() - t0) * 1000)
+    s = sorted(samples)
+    n = len(s)
+    median = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+    mean = sum(s) / n
+    std = (sum((x - mean) ** 2 for x in s) / n) ** 0.5
+    return median, mean, std, samples
+
+
+@torch.no_grad()
+def measure_prefill_recompute(model, prefix_ids, query_ids, device, warmup=3, iters=15):
+    """Time ONLY the prefill of (prefix+query) from scratch — the work KV-bridge avoids."""
+    full = torch.cat([prefix_ids, query_ids], dim=1)
+    return _time_call(lambda: model(full, use_cache=True), device, warmup, iters)
+
+
+@torch.no_grad()
+def measure_prefill_bridge_resident(model, factory, query_ids, device, warmup=3, iters=15):
+    """Time ONLY the query prefill on a GPU-resident cache (co-located case): the pure compute win.
+    `factory()` returns a fresh resident cache each call so reuse side-effects don't accumulate."""
+    def step():
+        _forward_at(model, query_ids, factory(), device)
+    return _time_call(step, device, warmup, iters)
+
+
+@torch.no_grad()
+def measure_transfer(prefix_kv_blob, device, warmup=2, iters=8):
+    """Time deserialize+rehydrate of the KV blob onto the GPU (the cross-node transfer tax)."""
+    return _time_call(lambda: deserialize_kv(prefix_kv_blob, device), device, warmup, iters)
+
+
+@torch.no_grad()
+def check_lossless(model, prefix_ids, query_ids, prefix_kv_blob, device, new_tokens=8):
+    """Greedy-decode new_tokens via recompute vs bridge; return (match: bool, recompute_tokens)."""
+    full = torch.cat([prefix_ids, query_ids], dim=1)
+    out = model(full, use_cache=True)
+    f = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    rec = [int(f)] + (_greedy(model, f, out.past_key_values, new_tokens - 1, device) if new_tokens > 1 else [])
+    cache = deserialize_kv(prefix_kv_blob, device)
+    ob = _forward_at(model, query_ids, cache, device)
+    fb = ob.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    bri = [int(fb)] + (_greedy(model, fb, ob.past_key_values, new_tokens - 1, device) if new_tokens > 1 else [])
+    return rec == bri, rec
 
 
 @torch.no_grad()
