@@ -70,11 +70,13 @@ small models pay an accuracy price. Our central, somewhat humbling, empirical re
 summarizing orchestrator saves \emph{more} tokens than reference-minimization, at equal accuracy ---
 so TOAP must justify itself on losslessness, security, and systematization, not on raw token savings.
 
-\callout{\textbf{What is measured vs.\ proposed.} The empirical results (\S\ref{sec:bytes},
-\S\ref{sec:results}) use the implemented V1 text protocol and real model generations. The
-architecture (\S\ref{sec:arch}) describes the full design; \textbf{\S\ref{sec:arch:status} states
-precisely which parts are implemented today and which are design proposals not yet evaluated}
-(notably the V2 binary plane and the KV-bridge materialization).}
+\callout{\textbf{What is measured vs.\ proposed.} The token experiments (\S\ref{sec:bytes},
+\S\ref{sec:results}) use the implemented V1 text protocol and real model generations; the KV-bridge
+experiment (\S\ref{sec:kv-results}) uses the implemented same-model prefix-reuse sidecar.
+\textbf{\S\ref{sec:arch:status} states precisely what is implemented today} (V1/V2 protocol, the
+context store with capability-lattice security, the materialization policy, and the KV-bridge sidecar)
+\textbf{and what remains future work} (durable/distributed store, cross-vendor evaluation, message
+signing).}
 
 \noindent\textbf{Contributions (all framed as a preliminary pilot).}
 \begin{enumerate}\itemsep1pt
@@ -167,7 +169,33 @@ from the authenticated session, never read from the wire; (ii) \emph{ACL} --- pe
 read/write/delete; (iii) \emph{capability} --- does this content's provenance permit this operation
 (\S\ref{sec:arch:security:cap}); and (iv) \emph{rate/replay} --- a per-agent token bucket and
 per-session duplicate-\texttt{msg\_id} rejection. A failure at any stage short-circuits to a typed
-error (\texttt{NOPERM}/\texttt{RATE}/\texttt{REPLAY}) and the message is never routed.
+error (\texttt{NOPERM}/\texttt{RATE}/\texttt{REPLAY}) and the message is never routed
+(Figure~\ref{fig:security}).
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=7mm,
+  chk/.style={draw, rounded corners, fill=tred!8, minimum width=2.5cm, minimum height=0.8cm, align=center},
+  term/.style={draw, rounded corners, minimum width=1.9cm, minimum height=0.7cm, align=center},
+  arr/.style={-{Stealth[length=1.8mm]}, thick}]
+\node[term, fill=tgray] (in) {inbound\\ message};
+\node[chk, right=8mm of in] (id) {1.~identity\\ (session)};
+\node[chk, right=6mm of id] (acl) {2.~ACL\\ (r/w/d)};
+\node[chk, right=6mm of acl] (cap) {3.~capability\\ (provenance)};
+\node[chk, right=6mm of cap] (rr) {4.~rate /\\ replay};
+\node[term, right=8mm of rr, fill=tgreen!15] (ok) {route};
+\node[term, below=10mm of cap, fill=tred!18] (no) {\texttt{ERR}\\ \scriptsize NOPERM/RATE/REPLAY};
+\draw[arr] (in)--(id); \draw[arr] (id)--(acl); \draw[arr] (acl)--(cap); \draw[arr] (cap)--(rr); \draw[arr] (rr)--(ok);
+\draw[arr, tred] (id) -- ++(0,-0.9) -| (no);
+\draw[arr, tred] (acl) -- ++(0,-0.55) -| (no);
+\draw[arr, tred] (cap) -- (no);
+\draw[arr, tred] (rr) -- ++(0,-0.9) -| (no);
+\end{tikzpicture}
+\caption{Broker-side security filter. Every inbound message passes four ordered checks; any failure
+short-circuits to a typed error and is never routed. Identity is derived from the session (never the
+wire); the capability check refuses, e.g., \texttt{EXEC}/\texttt{PAY}/\texttt{DELETE} on user-origin
+content.}
+\label{fig:security}
+\end{figure}
 
 \subsubsection{Broker / router}\label{sec:arch:broker}
 The broker binds one \texttt{agent\_id} per connection at SYN, routes \texttt{REQ} to the target agent,
@@ -196,9 +224,9 @@ transports are planned; nothing above the transport layer depends on the choice.
   arr/.style={-{Stealth[length=2mm]}, thick}]
 \node[layer, fill=tgray] (ag) {\textbf{Agent layer} --- LLM \& rule-based agents via the TOAP client API};
 \node[layer, fill=tgreen!18, below=of ag] (pr) {\textbf{Protocol layer} --- V1 text codec + V2 binary control-plane codec, schema validator, tokenizer-aligned encoder};
-\node[layer, fill=tred!15, below=of pr] (se) {\textbf{Security filter} --- broker-derived identity, per-context ACL, taint policy, rate limit, replay guard};
+\node[layer, fill=tred!15, below=of pr] (se) {\textbf{Security filter} --- broker-derived identity, per-context ACL, capability lattice, rate limit, replay guard};
 \node[layer, fill=tblue!12, below=of se] (br) {\textbf{Broker / router} --- sessions, target routing, \texttt{msg\_id} correlation, EVT fan-out};
-\node[layer, fill=tgray, below=of br] (cs) {\textbf{Shared context store} --- content once, owner/ACL/taint/TTL, field deltas + subscriptions};
+\node[layer, fill=tgray, below=of br] (cs) {\textbf{Shared context store} --- content once, owner/ACL/provenance/TTL, field deltas + subscriptions};
 \node[layer, fill=tgreen!10, below=of cs] (tr) {\textbf{Transport} --- length-prefixed TCP (V1) $\rightarrow$ WebSocket/gRPC \emph{(proposed)}};
 \draw[arr] (ag)--(pr); \draw[arr] (pr)--(se); \draw[arr] (se)--(br); \draw[arr] (br)--(cs); \draw[arr] (cs)--(tr);
 \end{tikzpicture}
@@ -212,9 +240,28 @@ session, ACL, capability tags, and nonces --- metadata whose cost is \emph{bytes
 latency, framing) and which the LLM should never see. The \emph{LLM} needs the operation and its
 content --- text whose cost is \emph{tokens} and which the broker should never tokenize. TOAP encodes
 these as two planes: a compact binary \emph{control plane} optimized for bytes, and a
-tokenizer-aligned \emph{semantic plane} optimized for tokens. Because each plane is encoded for its
-single reader, neither is dominated --- which is precisely why ``bytes vs.\ tokens'' (\S\ref{sec:bytes})
-stops being a confusion: they are different planes with different objectives.
+tokenizer-aligned \emph{semantic plane} optimized for tokens (Figure~\ref{fig:twoplane}). Because each
+plane is encoded for its single reader, neither is dominated --- which is precisely why ``bytes vs.\
+tokens'' (\S\ref{sec:bytes}) stops being a confusion: they are different planes with different objectives.
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=4mm,
+  plane/.style={draw, rounded corners, minimum width=6.4cm, minimum height=1.25cm, align=center},
+  reader/.style={draw, dashed, rounded corners, minimum width=3.0cm, minimum height=0.6cm, align=center},
+  arr/.style={-{Stealth[length=2mm]}, thick}]
+\node[plane, fill=tblue!12] (ctl) {\textbf{Control plane} (binary)\\ type $\cdot$ msg\_id $\cdot$ target $\cdot$ session\\ ACL $\cdot$ capability tag $\cdot$ nonce\\[1mm] \emph{optimize: wire bytes}};
+\node[plane, fill=tgreen!15, right=14mm of ctl] (sem) {\textbf{Semantic plane} (text)\\ \texttt{OP(args)?opts}\\ the operation + content\\[1mm] \emph{optimize: model tokens}};
+\node[reader, below=5mm of ctl, fill=tblue!6] (br) {read by the \textbf{broker}};
+\node[reader, below=5mm of sem, fill=tgreen!8] (llm) {read by the \textbf{LLM}};
+\draw[arr] (ctl)--(br); \draw[arr] (sem)--(llm);
+\node[font=\scriptsize, above=1mm of ctl] {(never tokenized)};
+\node[font=\scriptsize, above=1mm of sem] {(never seen by the broker)};
+\end{tikzpicture}
+\caption{Two-plane message format. Each plane is encoded for its single reader and cost function: the
+broker reads the byte-optimized control plane and never tokenizes the payload; the LLM reads the
+tokenizer-aligned semantic plane and never sees the control header.}
+\label{fig:twoplane}
+\end{figure}
 
 \subsection{Capability-lattice provenance}\label{sec:arch:security:cap}
 A boolean ``tainted'' flag cannot express \emph{what} untrusted content may do. TOAP attaches a
@@ -237,9 +284,34 @@ sends the id and the receiver fetches from the store (the dedup win for reused c
 points at a reusable KV cache so the receiver skips prefill (valid only for the same model and
 tokenizer). The same decision --- materialize now vs.\ reference vs.\ reuse computation --- spans both
 the token plane (resend text vs.\ send id) and the tensor plane (re-prefill vs.\ load KV); treating
-them as one policy is the architecture's most novel point. Figure~\ref{fig:flow} shows the token-flow
-contrast the experiment measures: naive prompts grow with pipeline depth while references stay flat,
-because the store holds content once and only ids travel.
+them as one policy is the architecture's most novel point (Figure~\ref{fig:spectrum}).
+Figure~\ref{fig:flow} shows the token-flow contrast the experiment measures: naive prompts grow with
+pipeline depth while references stay flat, because the store holds content once and only ids travel.
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=6mm,
+  ref/.style={draw, circle, fill=tgray, minimum size=1.15cm, align=center},
+  opt/.style={draw, rounded corners, minimum width=5.6cm, minimum height=0.85cm, align=center},
+  arr/.style={-{Stealth[length=2mm]}, thick}]
+\node[ref] (r) {ref\\ $R(X)$};
+\node[opt, fill=tgreen!8,  right=20mm of r, yshift=14mm] (i) {\textsc{Inline} --- embed text \emph{(tokens now; tiny/one-shot)}};
+\node[opt, fill=tgreen!20, right=20mm of r]              (c) {\textsc{Ctx\_Ref} --- send id, fetch from store \emph{(dedup win)}};
+\node[opt, fill=tblue!12,  right=20mm of r, yshift=-14mm] (k) {\textsc{KV\_Bridge} --- reuse KV cache \emph{(skip prefill; same-model)}};
+\draw[arr] (r)--(i); \draw[arr] (r)--(c); \draw[arr] (r)--(k);
+% graceful-degradation chain
+\draw[arr, tred, dashed] (k) to[bend right=12] node[right, font=\scriptsize, tred]{constraint fails} (c);
+\draw[arr, tred, dashed] (c) to[bend right=12] node[right, font=\scriptsize, tred]{store/size} (i);
+\node[draw, dashed, below=12mm of r, text width=10.8cm, align=center, font=\scriptsize]
+  {\textbf{cost model:} content length $\cdot$ reference frequency $\cdot$ link bandwidth $\cdot$ GPU load $\cdot$ same-model/tokenizer};
+\draw[arr, dashed] ($(r)+(0,-0.62)$) -- ++(0,-0.5);
+\end{tikzpicture}
+\caption{Reference materialization spectrum: one logical reference, three materializations chosen per
+call by a cost model, with graceful degradation
+$\textsc{KV\_Bridge}\!\rightarrow\!\textsc{Ctx\_Ref}\!\rightarrow\!\textsc{Inline}$ when constraints
+fail. The same decision spans the token plane (resend vs.\ id) and the tensor plane (re-prefill vs.\
+load KV).}
+\label{fig:spectrum}
+\end{figure}
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}[font=\footnotesize, node distance=5mm,
@@ -406,26 +478,21 @@ multi-head attention (GPT-2 family), rotary/NeoX (Pythia), and grouped-query att
 case, the pure compute win) and \emph{cross-node} (additionally charging KV deserialize/transfer).
 Correctness is exact greedy-token match vs.\ recompute.
 
-% === AWAITING COLAB DATA: fill Table~\ref{tab:kv} + Figure from benchmark/kv_bridge/kv_bench_all.json ===
-% \begin{table}[h]\centering\footnotesize
-% \begin{tabular}{llrrrrc}
-% \toprule
-% Model & Attn & Prefix & KV/text & Speedup (resident) & Speedup (x-node) & Lossless \\
-% \midrule
-% ... rows from kv_bench_all.json ...
-% \bottomrule
-% \end{tabular}
-% \caption{KV-bridge prefill reuse (T4). Resident = co-located compute win; x-node includes transfer.}
-% \label{tab:kv}
-% \end{table}
+\begin{figure}[h]\centering
+\includegraphics[width=0.82\textwidth]{figures/fig_kv_bridge.png}
+\caption{KV-bridge prefill reuse across the open-model matrix (T4). \emph{Left:} resident prefill
+speedup vs.\ shared-prefix length ($>1$ = faster than recompute). \emph{Right:} KV-cache size relative
+to the text it replaces. \textbf{Figure shows a placeholder; it is regenerated from the committed
+\texttt{kv\_bench\_all.json} via \texttt{paper/figures/gen\_kv\_figure.py} once the benchmark run is in.}}
+\label{fig:kv}
+\end{figure}
 
-\noindent\emph{Result placeholder (to be filled from the committed run records).} We expect the
-resident speedup to exceed $1\times$ above a crossover prefix length and to grow with prefix length and
-model size, with outputs token-lossless; the KV cache is orders of magnitude larger than the text it
-replaces (and larger for MHA than GQA), so the cross-node speedup crosses $1\times$ only at long
-prefixes. This is exactly why TOAP gates \textsc{KV\_Bridge} behind same-model and (effective)
-co-location, falling back to \textsc{Ctx\_Ref} otherwise --- a policy choice the measurement is meant to
-ground rather than assume.
+\noindent The hypothesis the figure tests (to be confirmed by the committed run): the resident speedup
+exceeds $1\times$ above a crossover prefix length and grows with prefix length and model size, while
+outputs stay token-lossless; because the KV cache is orders of magnitude larger than the text (and
+larger for MHA than GQA), the cross-node speedup crosses $1\times$ only at long prefixes. This is
+exactly why TOAP gates \textsc{KV\_Bridge} behind same-model and (effective) co-location, falling back
+to \textsc{Ctx\_Ref} otherwise --- a policy choice the measurement grounds rather than assumes.
 
 \section{Discussion and Limitations}\label{sec:disc}
 The honest synthesis: \emph{naive transcript accumulation is wasteful; both summarization and
@@ -442,10 +509,10 @@ task:} $n{=}33$ on one incident scenario with a fixed upstream; broader datasets
 does not stress the losslessness advantage --- a harder task that needs a detail a summary would drop
 is exactly the missing experiment. \textbf{Scorer:} keyword coverage is bias-free but coarse; it can
 miss paraphrase. \textbf{Judge:} any model judge here is same-family and is used only as a discarded
-secondary check. \textbf{Implementation gap:} the V2 binary control plane, capability lattice,
-cache-coordinate layout, and materialization-with-fallback are now implemented and unit-tested; only
-the actual KV-cache \emph{tensor transport} still requires a model runtime (without one the policy
-degrades to CTX\_REF) and is not benchmarked here.
+secondary check. \textbf{Implementation scope:} the V2 binary control plane, capability lattice,
+cache-coordinate layout, materialization-with-fallback, and the same-model KV-bridge sidecar are
+implemented and tested. What remains future work is a durable/distributed context store, message
+signing / cross-reconnect replay nonces, and cross-vendor (non-Claude) replication of the token study.
 
 \textbf{On novelty.} We claim none for the mechanism. The contribution is the controlled, bias-free,
 reproducible accounting --- including the finding that a summarizing baseline beats referencing on
