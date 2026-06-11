@@ -6,7 +6,7 @@
 \usepackage{xcolor}
 \usepackage{hyperref}
 \usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc,decorations.pathreplacing}
 \hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
 
 \definecolor{tgreen}{HTML}{2F6F4F}
@@ -191,25 +191,27 @@ materialization spectrum (\S\ref{sec:refspec}).
 \node[head] (O) at (0,0) {orchestrator};
 \node[head] (B) at (5,0) {broker};
 \node[head] (W) at (10,0) {worker};
-\foreach \n in {O,B,W} \draw[lifeline] (\n.south) -- ++(0,-8.6);
-\def\y{-0.8}
-% 1. store
+\foreach \n in {O,B,W} \draw[lifeline] (\n.south) -- ++(0,-9.8);
+\def\y{-0.9}
+% 1. store (orchestrator -> broker -> back)
 \draw[msg] ($(O.south)+(0,\y)$) -- node[above,font=\scriptsize]{\ttfamily SET()?data=<doc>} ($(B.south)+(0,\y)$);
-\draw[msg] ($(B.south)+(0,\y-0.7)$) -- node[above,font=\scriptsize]{\ttfamily RES|7|OK(CTX:42)} ($(O.south)+(0,\y-0.7)$);
-\node[note, right] at ($(B.south)+(0,\y-1.15)$) {document now lives once, as CTX:42};
-% 2. request
-\draw[msg] ($(O.south)+(0,\y-1.9)$) -- node[above,font=\scriptsize]{\ttfamily REQ|8|worker|SUM(CTX:42)?max\_words=60} ($(B.south)+(0,\y-1.9)$);
-% broker self-checks
+\draw[msg] ($(B.south)+(0,\y-0.8)$) -- node[above,font=\scriptsize]{\ttfamily RES|7|OK(CTX:42)} ($(O.south)+(0,\y-0.8)$);
+\node[note] at ($(O.south)!0.5!(B.south)+(0,\y-1.25)$) {document now lives once, as CTX:42};
+% 2. request (orchestrator -> broker)
+\draw[msg] ($(O.south)+(0,\y-2.1)$) -- node[above,font=\scriptsize]{\ttfamily REQ|8|worker|SUM(CTX:42)?max\_words=60} ($(B.south)+(0,\y-2.1)$);
+% broker self-checks (box sits on the broker lifeline, between its two arrows)
 \node[draw, rounded corners, fill=tred!7, align=left, font=\scriptsize, anchor=north]
-  at ($(B.south)+(0,\y-2.35)$)
+  at ($(B.south)+(0,\y-2.55)$)
   {identity = orchestrator \emph{(from session)}\\ ACL: worker may read CTX:42? ok\\ capability: SUM on this origin? ok\\ rate / replay? ok};
-\draw[msg] ($(B.south)+(0,\y-4.3)$) -- node[above,font=\scriptsize]{\ttfamily REQ|8|SUM(CTX:42)} ($(W.south)+(0,\y-4.3)$);
-\node[note] at ($(W.south)+(0,\y-4.75)$) {worker GETs CTX:42, summarizes};
-\draw[msg] ($(W.south)+(0,\y-5.4)$) -- node[above,font=\scriptsize]{\ttfamily RES|8|OK(CTX:87)} ($(B.south)+(0,\y-5.4)$);
-% 3. reply correlated by msg_id
-\draw[msg] ($(B.south)+(0,\y-6.1)$) -- node[above,font=\scriptsize]{\ttfamily RES|8|OK(CTX:87)} ($(O.south)+(0,\y-6.1)$);
-\node[note, right] at ($(B.south)+(0,\y-6.5)$) {broker matches msg\_id 8 back to its requester};
-\node[note] at ($(O.south)+(0,\y-7.0)$) {orchestrator GETs CTX:87};
+% broker -> worker (well clear of the box)
+\draw[msg] ($(B.south)+(0,\y-4.9)$) -- node[above,font=\scriptsize]{\ttfamily REQ|8|SUM(CTX:42)} ($(W.south)+(0,\y-4.9)$);
+\node[note] at ($(B.south)!0.5!(W.south)+(0,\y-5.3)$) {worker resolves CTX:42, summarizes};
+% worker -> broker
+\draw[msg] ($(W.south)+(0,\y-6.1)$) -- node[above,font=\scriptsize]{\ttfamily RES|8|OK(CTX:87)} ($(B.south)+(0,\y-6.1)$);
+% 3. broker -> orchestrator, correlated by msg_id
+\draw[msg] ($(B.south)+(0,\y-7.1)$) -- node[above,font=\scriptsize]{\ttfamily RES|8|OK(CTX:87)} ($(O.south)+(0,\y-7.1)$);
+\node[note] at ($(B.south)!0.5!(W.south)+(0,\y-7.5)$) {broker matches msg\_id 8 to its requester};
+\node[note] at ($(O.south)!0.5!(B.south)+(0,\y-8.0)$) {orchestrator resolves CTX:87};
 \end{tikzpicture}
 \caption{One request, traced through the stack. The document is stored once and thereafter referenced
 by id; the inter-agent message carries \texttt{CTX:42}, not the document. The broker stamps the
@@ -309,11 +311,48 @@ makes concurrency safe for free: an agent can have many requests in flight and t
 replies by id, so two overlapping summaries cannot get crossed. The same machinery drives
 subscriptions: a \texttt{PATCH} (a \texttt{DLT} message) to a context fans out an \texttt{EVT} to every
 agent that subscribed to it, which is how collaborative state changes propagate without polling.
+Figure~\ref{fig:broker} shows both mechanisms side by side.
 
 Routing everything through one broker is what makes all of this possible, and it is also the system's
 main structural weakness: the broker is a single point of failure and a throughput chokepoint. We state
 that plainly as a threat-model assumption rather than design around it here (\S\ref{sec:disc}); making
 the broker highly available is exactly the distributed-systems work we have not done.
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=5mm,
+  ag/.style={draw, rounded corners, fill=tgray, minimum width=1.7cm, minimum height=0.6cm},
+  brk/.style={draw, rounded corners, fill=tblue!12, minimum width=2.6cm, minimum height=1.5cm, align=center},
+  arr/.style={-{Stealth[length=1.8mm]}, thick}]
+% left: correlation
+\node[brk] (b1) {broker\\[1mm]\scriptsize pending\\\scriptsize \{8$\to$A, 9$\to$C\}};
+\node[ag, above left=4mm and 12mm of b1] (a) {agent A};
+\node[ag, below left=4mm and 12mm of b1] (c) {agent C};
+\node[ag, right=14mm of b1] (w) {worker};
+\draw[arr] (a.east) -- node[above,font=\scriptsize]{\ttfamily REQ|8} (b1.north west);
+\draw[arr] (c.east) -- node[below,font=\scriptsize]{\ttfamily REQ|9} (b1.south west);
+\draw[arr] (b1.east) -- node[above,font=\scriptsize]{\ttfamily REQ|8} (w.west);
+\draw[arr] ($(w.west)+(0,-2mm)$) -- node[below,font=\scriptsize]{\ttfamily RES|8} ($(b1.east)+(0,-2mm)$);
+\draw[arr] (b1.north west) -- node[above,font=\scriptsize]{\ttfamily RES|8} (a.east);
+\node[font=\scriptsize\itshape, gray!60!black, below=1mm of b1] {reply id 8 $\to$ A, not by name};
+% right: fan-out
+\node[brk, right=42mm of b1, minimum height=0.9cm] (b2) {broker};
+\node[ag, left=20mm of b2] (e) {editor};
+\node[ag, above right=5mm and 12mm of b2] (s1) {sub 1};
+\node[ag, right=12mm of b2] (s2) {sub 2};
+\node[ag, below right=5mm and 12mm of b2] (s3) {sub 3};
+\draw[arr] (e.east) -- node[above,font=\scriptsize]{\ttfamily DLT|PATCH} (b2.west);
+\draw[arr] (b2.east) -- node[font=\scriptsize]{} (s1.west);
+\draw[arr] (b2.east) -- node[above,font=\scriptsize]{\ttfamily EVT} (s2.west);
+\draw[arr] (b2.east) -- node[font=\scriptsize]{} (s3.west);
+\node[font=\scriptsize\itshape, gray!60!black, below=1mm of b2] {one PATCH, fanned out as EVT};
+\end{tikzpicture}
+\caption{Two broker mechanisms. \emph{Left:} correlation by \texttt{msg\_id} --- the broker holds a
+pending map (id $\to$ requester) so concurrent requests from A and C are untangled, and a worker's
+\texttt{RES|8} is returned to A by its id, never by a name the worker had to know. \emph{Right:}
+subscription fan-out --- a single \texttt{PATCH} to a context is pushed as an \texttt{EVT} to every
+subscriber, so collaborative changes propagate without polling.}
+\label{fig:broker}
+\end{figure}
 
 \subsubsection{Shared context store}\label{sec:arch:store}
 This is where the document in the trace actually lives. Content is written once and addressed by a
@@ -330,6 +369,36 @@ versioned delta and wakes subscribers, rather than two agents clobbering each ot
 backend today is in-memory and single-node, which is enough to demonstrate all of this but not to
 survive a restart or scale across machines; a durable, distributed store is future work
 (\S\ref{sec:future}), and is the honest precondition for the systematization argument.
+Figure~\ref{fig:entry} lays out one entry and what each field buys.
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[font=\footnotesize, node distance=0mm,
+  field/.style={draw, minimum width=4.0cm, minimum height=0.62cm, anchor=north, align=left},
+  prop/.style={font=\scriptsize\itshape, gray!55!black, anchor=west},
+  arr/.style={-{Stealth[length=1.6mm]}, gray!60}]
+\node[field, fill=tgray, font=\bfseries] (h) {CTX:42 \quad (the entry)};
+\node[field, fill=tred!6, below=0mm of h] (data) {\ttfamily data: <the full document bytes>};
+\node[field, below=0mm of data] (owner) {\ttfamily owner: orchestrator \ (broker-derived)};
+\node[field, below=0mm of owner] (acl) {\ttfamily acl: orchestrator=rwd, worker=r};
+\node[field, fill=tblue!8, below=0mm of acl] (prov) {\ttfamily provenance: User \ (allowed: read,sum,cls)};
+\node[field, below=0mm of prov] (ttl) {\ttfamily ttl / expires\_at \ (+ GC)};
+\node[field, fill=tgreen!8, below=0mm of ttl] (ver) {\ttfamily version: 3 \ + delta log};
+\node[field, below=0mm of ver] (subs) {\ttfamily subscribers: \{writer, auditor\}};
+% property annotations
+\node[prop] at ($(data.east)+(4mm,0)$) {stores content $\Rightarrow$ \textbf{lossless} (resolves to the original)};
+\node[prop] at ($(owner.east)+(4mm,0)$) {identity not claimable on the wire};
+\node[prop] at ($(acl.east)+(4mm,0)$) {who may read / write / delete};
+\node[prop] at ($(prov.east)+(4mm,0)$) {travels with the ref $\Rightarrow$ \textbf{security} per hop};
+\node[prop] at ($(ttl.east)+(4mm,0)$) {bounded lifetime, reclaimed automatically};
+\node[prop] at ($(ver.east)+(4mm,0)$) {versioned edits $\Rightarrow$ \textbf{collaborative} (no clobber)};
+\node[prop] at ($(subs.east)+(4mm,0)$) {who to wake on a PATCH (drives EVT fan-out)};
+\end{tikzpicture}
+\caption{Anatomy of a stored context. The entry is far more than its bytes; each field earns a property
+the bare content could not. Storing the content (not a digest) is what makes the reference lossless;
+carrying provenance \emph{in} the entry is what lets security travel with it; the version and delta log
+are what make collaborative edits safe.}
+\label{fig:entry}
+\end{figure}
 
 \subsubsection{Transport}\label{sec:arch:transport}
 The bottom layer just moves bytes: length-prefixed records over TCP (Tokio), where the prefix tells the
@@ -365,21 +434,64 @@ plane is encoded for its single reader, neither is dominated --- which is precis
 tokens'' (\S\ref{sec:bytes}) stops being a confusion: they are different planes with different objectives.
 
 \begin{figure}[h]\centering
-\begin{tikzpicture}[font=\footnotesize, node distance=4mm,
-  plane/.style={draw, rounded corners, minimum width=6.4cm, minimum height=1.25cm, align=center},
-  reader/.style={draw, dashed, rounded corners, minimum width=3.0cm, minimum height=0.6cm, align=center},
-  arr/.style={-{Stealth[length=2mm]}, thick}]
-\node[plane, fill=tblue!12] (ctl) {\textbf{Control plane} (binary)\\ type $\cdot$ msg\_id $\cdot$ target $\cdot$ session\\ ACL $\cdot$ capability tag $\cdot$ nonce\\[1mm] \emph{optimize: wire bytes}};
-\node[plane, fill=tgreen!15, right=14mm of ctl] (sem) {\textbf{Semantic plane} (text)\\ \texttt{OP(args)?opts}\\ the operation + content\\[1mm] \emph{optimize: model tokens}};
-\node[reader, below=5mm of ctl, fill=tblue!6] (br) {read by the \textbf{broker}};
-\node[reader, below=5mm of sem, fill=tgreen!8] (llm) {read by the \textbf{LLM}};
-\draw[arr] (ctl)--(br); \draw[arr] (sem)--(llm);
-\node[font=\scriptsize, above=1mm of ctl] {(never tokenized)};
-\node[font=\scriptsize, above=1mm of sem] {(never seen by the broker)};
+\begin{tikzpicture}[font=\footnotesize,
+  cc/.style={draw, fill=tblue!16, minimum height=8mm, align=center, font=\ttfamily\scriptsize, inner xsep=4pt, outer sep=0pt},
+  sc/.style={draw, fill=tgreen!18, minimum height=8mm, align=center, font=\ttfamily\scriptsize, inner xsep=4pt, outer sep=0pt},
+  rd/.style={draw, rounded corners, align=left, inner sep=6pt, text width=6.3cm},
+  arr/.style={-{Stealth[length=2.2mm]}, thick},
+  lab/.style={font=\scriptsize}]
+
+% --- the byte frame, built left-to-right (centerpiece) ---
+\node[cc] (b0) at (0,0) {02};
+\node[cc, right=0pt of b0] (b1) {03};
+\node[cc, right=0pt of b1] (b2) {00 00 00 07};
+\node[cc, right=0pt of b2] (b3) {01};
+\node[cc, right=0pt of b3] (b4) {06};
+\node[cc, right=0pt of b4] (b5) {\,worker\,};
+\node[cc, right=0pt of b5] (b6) {00 18};
+\node[sc, right=0pt of b6] (p)  {\,SUM(CTX:42)?max\_words=60\,};
+
+% field labels above each cell
+\node[lab, above=1pt of b0]{ver}; \node[lab, above=1pt of b1]{type};
+\node[lab, above=1pt of b2]{msg\_id}; \node[lab, above=1pt of b3]{flags};
+\node[lab, above=1pt of b4]{tlen}; \node[lab, above=1pt of b5]{target};
+\node[lab, above=1pt of b6]{plen}; \node[lab, above=1pt of p]{payload\,=\,op + args};
+
+% --- input message, centered above the frame ---
+\node[draw, rounded corners, fill=tgray, align=center, inner sep=5pt, anchor=south]
+  (in) at ($(b0.north west)!0.5!(p.north east)+(0,15mm)$)
+  {\textbf{1. One logical message} \;(application level)\\[0.5mm]
+   \texttt{REQ}, id \texttt{7}, $\to$ \texttt{worker}, op \texttt{SUM(CTX:42)?max\_words=60}, origin \texttt{User}};
+\draw[arr] (in.south) -- node[right, lab]{\ttfamily\,encode\_v2() splits one message into two planes} ($(in.south)+(0,-7mm)$);
+
+% --- braces under the frame marking the two planes ---
+\draw[decorate, decoration={brace, amplitude=4pt, mirror}] (b0.south west) -- (b6.south east)
+  node[midway, below=4pt, lab, tblue, align=center]
+  {\textbf{2a. control plane} — binary, 16\,B\\ broker only, \emph{never tokenized}};
+\draw[decorate, decoration={brace, amplitude=4pt, mirror}] (p.south west) -- (p.south east)
+  node[midway, below=4pt, lab, tgreen!55!black, align=center]
+  {\textbf{2b. semantic plane} — text, 24\,B\\ LLM only, \emph{never sees header}};
+
+% --- two readers, each fed by its own plane ---
+\node[rd, fill=tblue!8, anchor=north east] (br) at ($(b3.south)+(0,-1.7cm)$)
+  {\textbf{3a. broker} reads bytes\\[0.5mm]
+   route by \texttt{msg\_id}\,+\,\texttt{target}; check ACL / capability / nonce on the header.
+   Cost is \emph{bytes}; the payload is forwarded opaque.};
+\node[rd, fill=tgreen!10, anchor=north west] (llm) at ($(p.south)+(0,-1.7cm)$)
+  {\textbf{3b. LLM} reads text\\[0.5mm]
+   tokenizes \texttt{SUM(CTX:42)?max\_words=60} and runs the op. Cost is \emph{tokens}; it never
+   parses the control header.};
+\draw[arr, tblue]  ($(b3.south)+(0,-0.5cm)$) -- (br.north);
+\draw[arr, tgreen] ($(p.south)+(0,-0.5cm)$)  -- (llm.north);
 \end{tikzpicture}
-\caption{Two-plane message format. Each plane is encoded for its single reader and cost function: the
-broker reads the byte-optimized control plane and never tokenizes the payload; the LLM reads the
-tokenizer-aligned semantic plane and never sees the control header.}
+\caption{How one message travels through the two planes (input $\to$ output). A single application-level
+message is serialized by \texttt{encode\_v2()} into one frame holding two regions encoded for opposite
+cost functions: a compact \emph{binary control plane} (version, type, \texttt{msg\_id}, flags, target,
+length --- the only part the broker reads, and it never tokenizes it) followed by the \emph{text
+semantic plane} (the \texttt{OP(args)?opts} the LLM reads and tokenizes, and never the header). Bytes
+shown are the real \texttt{toap-core} V2 layout for this message. Because each region is optimized for
+its single reader, neither is dominated --- which is why ``bytes vs.\ tokens'' (\S\ref{sec:bytes}) is a
+plane distinction, not a confusion.}
 \label{fig:twoplane}
 \end{figure}
 
