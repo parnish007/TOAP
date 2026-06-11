@@ -1,6 +1,7 @@
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
+\usepackage{float}
 \usepackage{booktabs}
 \usepackage{amsmath}
 \usepackage{xcolor}
@@ -311,45 +312,52 @@ makes concurrency safe for free: an agent can have many requests in flight and t
 replies by id, so two overlapping summaries cannot get crossed. The same machinery drives
 subscriptions: a \texttt{PATCH} (a \texttt{DLT} message) to a context fans out an \texttt{EVT} to every
 agent that subscribed to it, which is how collaborative state changes propagate without polling.
-Figure~\ref{fig:broker} shows both mechanisms side by side.
+Figure~\ref{fig:broker} draws both mechanisms.
 
 Routing everything through one broker is what makes all of this possible, and it is also the system's
 main structural weakness: the broker is a single point of failure and a throughput chokepoint. We state
 that plainly as a threat-model assumption rather than design around it here (\S\ref{sec:disc}); making
 the broker highly available is exactly the distributed-systems work we have not done.
 
-\begin{figure}[h]\centering
-\begin{tikzpicture}[font=\footnotesize, node distance=5mm,
-  ag/.style={draw, rounded corners, fill=tgray, minimum width=1.7cm, minimum height=0.6cm},
-  brk/.style={draw, rounded corners, fill=tblue!12, minimum width=2.6cm, minimum height=1.5cm, align=center},
-  arr/.style={-{Stealth[length=1.8mm]}, thick}]
-% left: correlation
-\node[brk] (b1) {broker\\[1mm]\scriptsize pending\\\scriptsize \{8$\to$A, 9$\to$C\}};
-\node[ag, above left=4mm and 12mm of b1] (a) {agent A};
-\node[ag, below left=4mm and 12mm of b1] (c) {agent C};
-\node[ag, right=14mm of b1] (w) {worker};
-\draw[arr] (a.east) -- node[above,font=\scriptsize]{\ttfamily REQ|8} (b1.north west);
-\draw[arr] (c.east) -- node[below,font=\scriptsize]{\ttfamily REQ|9} (b1.south west);
-\draw[arr] (b1.east) -- node[above,font=\scriptsize]{\ttfamily REQ|8} (w.west);
-\draw[arr] ($(w.west)+(0,-2mm)$) -- node[below,font=\scriptsize]{\ttfamily RES|8} ($(b1.east)+(0,-2mm)$);
-\draw[arr] (b1.north west) -- node[above,font=\scriptsize]{\ttfamily RES|8} (a.east);
-\node[font=\scriptsize\itshape, gray!60!black, below=1mm of b1] {reply id 8 $\to$ A, not by name};
-% right: fan-out
-\node[brk, right=42mm of b1, minimum height=0.9cm] (b2) {broker};
-\node[ag, left=20mm of b2] (e) {editor};
-\node[ag, above right=5mm and 12mm of b2] (s1) {sub 1};
-\node[ag, right=12mm of b2] (s2) {sub 2};
-\node[ag, below right=5mm and 12mm of b2] (s3) {sub 3};
-\draw[arr] (e.east) -- node[above,font=\scriptsize]{\ttfamily DLT|PATCH} (b2.west);
-\draw[arr] (b2.east) -- node[font=\scriptsize]{} (s1.west);
-\draw[arr] (b2.east) -- node[above,font=\scriptsize]{\ttfamily EVT} (s2.west);
-\draw[arr] (b2.east) -- node[font=\scriptsize]{} (s3.west);
-\node[font=\scriptsize\itshape, gray!60!black, below=1mm of b2] {one PATCH, fanned out as EVT};
+\begin{figure}[H]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  ag/.style={draw, rounded corners, fill=tgray, minimum width=1.6cm, minimum height=0.6cm},
+  brk/.style={draw, rounded corners, fill=tblue!12, minimum width=2.4cm, minimum height=1.0cm, align=center},
+  arr/.style={-{Stealth[length=1.8mm]}, thick},
+  sl/.style={font=\scriptsize}, note/.style={font=\scriptsize\itshape, gray!55!black}]
+
+% ===== (a) correlation by msg_id : requests on the top lane, responses on the bottom lane =====
+\node[sl, anchor=west] at (-0.2,1.45) {\textbf{(a) correlation by \texttt{msg\_id}}};
+\node[ag]               (a)  at (0,0.7)    {agent A};
+\node[ag]               (c)  at (0,-0.7)   {agent C};
+\node[brk]              (b1) at (3.6,0)    {broker\\[0.3mm]\scriptsize pending \{8$\to$A,\,9$\to$C\}};
+\node[ag]               (w)  at (7.6,0)    {worker};
+% requests in (top), response back to A (bottom) -- arcs keep the two directions apart
+\draw[arr] (a.east)        to[bend left=10]  node[sl,above]{\ttfamily REQ|8} (b1.north west);
+\draw[arr] (c.east)        to[bend right=10] node[sl,below]{\ttfamily REQ|9} (b1.south west);
+\draw[arr] (b1.north east) to[bend left=10]  node[sl,above]{\ttfamily REQ|8} (w.north west);
+\draw[arr] (w.south west)  to[bend left=10]  node[sl,below]{\ttfamily RES|8} (b1.south east);
+\draw[arr] (b1.west)       to[bend right=22] node[sl,below]{\ttfamily RES|8} (a.south east);
+\node[note] at (3.6,-1.45) {reply id 8 $\to$ A by the map, never by a name the worker knows};
+
+% ===== (b) subscription fan-out =====
+\node[sl, anchor=west] at (-0.2,-2.55) {\textbf{(b) subscription fan-out}};
+\node[ag]                  (e)  at (0,-3.7)    {editor};
+\node[brk, minimum height=0.7cm] (b2) at (3.6,-3.7) {broker};
+\node[ag]                  (s1) at (7.6,-2.9)   {sub 1};
+\node[ag]                  (s2) at (7.6,-3.7)   {sub 2};
+\node[ag]                  (s3) at (7.6,-4.5)   {sub 3};
+\draw[arr] (e.east)  -- node[sl,above]{\ttfamily DLT|PATCH} (b2.west);
+\draw[arr] (b2.east) -- node[sl,above,pos=0.6]{\ttfamily EVT} (s1.west);
+\draw[arr] (b2.east) -- node[sl,above]{\ttfamily EVT} (s2.west);
+\draw[arr] (b2.east) -- node[sl,below,pos=0.6]{\ttfamily EVT} (s3.west);
+\node[note] at (3.6,-4.95) {one PATCH, fanned out as EVT to every subscriber};
 \end{tikzpicture}
-\caption{Two broker mechanisms. \emph{Left:} correlation by \texttt{msg\_id} --- the broker holds a
-pending map (id $\to$ requester) so concurrent requests from A and C are untangled, and a worker's
-\texttt{RES|8} is returned to A by its id, never by a name the worker had to know. \emph{Right:}
-subscription fan-out --- a single \texttt{PATCH} to a context is pushed as an \texttt{EVT} to every
+\caption{Two broker mechanisms, drawn separately so each reads cleanly. \textbf{(a)} Correlation by
+\texttt{msg\_id}: the broker keeps a pending map (id $\to$ requester), so concurrent requests from A
+(id~8) and C (id~9) are untangled; the worker replies \emph{to the id}, and the broker routes
+\texttt{RES|8} back to A by the map --- never by a name the worker had to know. \textbf{(b)} Subscription
+fan-out: a single \texttt{PATCH} (a \texttt{DLT}) to a context is pushed as an \texttt{EVT} to every
 subscriber, so collaborative changes propagate without polling.}
 \label{fig:broker}
 \end{figure}
@@ -371,7 +379,7 @@ survive a restart or scale across machines; a durable, distributed store is futu
 (\S\ref{sec:future}), and is the honest precondition for the systematization argument.
 Figure~\ref{fig:entry} lays out one entry and what each field buys.
 
-\begin{figure}[h]\centering
+\begin{figure}[H]\centering
 \begin{tikzpicture}[font=\footnotesize, node distance=0mm,
   field/.style={draw, minimum width=4.0cm, minimum height=0.62cm, anchor=north, align=left},
   prop/.style={font=\scriptsize\itshape, gray!55!black, anchor=west},
