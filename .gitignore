@@ -92,3 +92,5 @@ paper/*.fdb_latexmk
 
 # private research notes (not for publication)
 research-cot-synthesis.md
+research.md
+TEST_PLAN.md
