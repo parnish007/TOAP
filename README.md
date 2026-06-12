@@ -34,8 +34,7 @@
 <div align="center">
 
 **Author:** Trilochan Sharma — Independent Researcher · [@parnish007](https://github.com/parnish007)
-**Paper:** [`paper/main.pdf`](paper/main.pdf) — *A Reference-Minimized, Two-Plane Architecture for Inter-Agent Messaging* · **Walkthrough:** [`docs/EXPLAINER.md`](docs/EXPLAINER.md) · **Zenodo DOI:** _to be minted on release_
-
+**Paper:** [`paper/main.pdf`](paper/main.pdf) — *A Reference-Minimized, Two-Plane Architecture for Inter-Agent Messaging* · **Walkthrough:** [`docs/EXPLAINER.md`](docs/EXPLAINER.md) · **Zenodo DOI:** [10.5281/zenodo.20671083](https://zenodo.org/records/20671083)
 </div>
 
 ---
